@@ -109,8 +109,13 @@ fun FeedScreen(
     var loadError by remember(dataSource) { mutableStateOf(false) }
     var refreshKey by remember { mutableIntStateOf(0) }
     var reactionBusy by remember { mutableStateOf<String?>(null) }
+    var recipeCategories by remember(dataSource) { mutableStateOf<List<RecipeCategory>>(emptyList()) }
+    var categoriesLoading by remember(dataSource) { mutableStateOf(true) }
+    var categoriesError by remember(dataSource) { mutableStateOf(false) }
+    var categoriesRefresh by remember { mutableIntStateOf(0) }
 
     var pickedImage by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedRecipeCategoryId by rememberSaveable { mutableStateOf<Int?>(null) }
     var title by rememberSaveable { mutableStateOf("") }
     var description by rememberSaveable { mutableStateOf("") }
     var recipe by rememberSaveable { mutableStateOf("") }
@@ -135,6 +140,13 @@ fun FeedScreen(
             .onFailure { loadError = true }
         loading = false
     }
+    LaunchedEffect(dataSource, categoriesRefresh) {
+        categoriesLoading = true
+        runCatching { dataSource.loadCategories() }
+            .onSuccess { recipeCategories = it; categoriesError = false }
+            .onFailure { categoriesError = true }
+        categoriesLoading = false
+    }
     LaunchedEffect(dataSource, page, activePostId, commentsRefresh) {
         val postId = activePostId
         if (page == "comments" && postId != null) {
@@ -152,6 +164,12 @@ fun FeedScreen(
         when (page) {
             "editor" -> FeedEditor(
                 pickedImage = pickedImage,
+                categories = recipeCategories,
+                selectedCategoryId = selectedRecipeCategoryId,
+                onCategorySelected = { selectedRecipeCategoryId = it; saveError = null },
+                categoriesLoading = categoriesLoading,
+                categoriesError = categoriesError,
+                onRetryCategories = { categoriesRefresh++ },
                 title = title,
                 onTitleChange = { title = it.take(120) },
                 description = description,
@@ -164,9 +182,11 @@ fun FeedScreen(
                 onPickImage = { photoPicker.launch("image/*") },
                 onSave = {
                     val uri = pickedImage?.let(Uri::parse)
+                    val categoryId = selectedRecipeCategoryId
                     when {
                         currentLogin.isBlank() -> saveError = "Подождите загрузки профиля"
                         uri == null -> saveError = "Выберите фотографию рецепта"
+                        categoryId == null -> saveError = "Выберите категорию"
                         title.isBlank() || description.isBlank() || recipe.isBlank() ->
                             saveError = "Заполните название, описание и рецепт"
                         else -> {
@@ -174,8 +194,9 @@ fun FeedScreen(
                             saveError = null
                             scope.launch {
                                 try {
-                                    dataSource.publish(context, currentUserId, currentLogin, uri, title.trim(), description.trim(), recipe.trim())
+                                    dataSource.publish(context, currentUserId, currentLogin, uri, title.trim(), description.trim(), recipe.trim(), categoryId)
                                     pickedImage = null
+                                    selectedRecipeCategoryId = null
                                     title = ""
                                     description = ""
                                     recipe = ""
@@ -219,6 +240,7 @@ fun FeedScreen(
                                     dataSource.addComment(post.id, currentUserId, currentLogin, commentText.trim())
                                     commentText = ""
                                     commentsRefresh++
+                                    refreshKey++
                                 } catch (_: Exception) {
                                     commentError = "Не удалось отправить комментарий"
                                 } finally {
@@ -299,6 +321,7 @@ fun FeedScreen(
                             items(visiblePosts, key = { it.id }) { post ->
                                 FeedPostCard(
                                     post = post,
+                                    categoryName = recipeCategories.firstOrNull { it.id == post.categoryId }?.name,
                                     dataSource = dataSource,
                                     currentUserId = currentUserId,
                                     reactionBusy = reactionBusy == post.id,
@@ -350,6 +373,7 @@ fun FeedScreen(
 @Composable
 private fun FeedPostCard(
     post: FeedPost,
+    categoryName: String?,
     dataSource: FeedDataSource,
     currentUserId: String,
     reactionBusy: Boolean,
@@ -366,6 +390,9 @@ private fun FeedPostCard(
             FeedPostImage(dataSource, post.imagePath)
             Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
                 Text("@${post.authorLogin}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                if (categoryName != null) {
+                    Text(categoryName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
                 Spacer(Modifier.height(6.dp))
                 Text(post.title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(6.dp))
@@ -404,7 +431,12 @@ private fun FeedPostCard(
                             }
                         }
                     }
-                    IconButton(onClick = onComments) { Icon(Icons.Outlined.ChatBubbleOutline, contentDescription = "Комментарии") }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = onComments) {
+                            Icon(Icons.Outlined.ChatBubbleOutline, contentDescription = "Комментарии: ${post.commentCount}")
+                        }
+                        Text(post.commentCount.toString(), style = MaterialTheme.typography.labelMedium)
+                    }
                     IconButton(onClick = onShare) { Icon(Icons.Outlined.Share, contentDescription = "Репост") }
                 }
             }
@@ -453,6 +485,12 @@ private fun FeedImageFrame(bitmap: ImageBitmap?) {
 @Composable
 private fun FeedEditor(
     pickedImage: String?,
+    categories: List<RecipeCategory>,
+    selectedCategoryId: Int?,
+    onCategorySelected: (Int) -> Unit,
+    categoriesLoading: Boolean,
+    categoriesError: Boolean,
+    onRetryCategories: () -> Unit,
     title: String,
     onTitleChange: (String) -> Unit,
     description: String,
@@ -466,6 +504,7 @@ private fun FeedEditor(
     onSave: () -> Unit,
 ) {
     val context = LocalContext.current
+    var categoryMenuExpanded by remember { mutableStateOf(false) }
     val preview by produceState<ImageBitmap?>(null, pickedImage) {
         value = pickedImage?.let { path ->
             runCatching { FeedImageStorage.preview(context, Uri.parse(path))?.asImageBitmap() }.getOrNull()
@@ -483,6 +522,29 @@ private fun FeedEditor(
             Text(if (pickedImage == null) "Выбрать фото" else "Сменить фото")
         }
         Spacer(Modifier.height(14.dp))
+        Box {
+            OutlinedButton(
+                onClick = { categoryMenuExpanded = true },
+                enabled = categories.isNotEmpty(),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(categories.firstOrNull { it.id == selectedCategoryId }?.name ?: "Выбрать категорию")
+            }
+            DropdownMenu(expanded = categoryMenuExpanded, onDismissRequest = { categoryMenuExpanded = false }) {
+                categories.forEach { category ->
+                    DropdownMenuItem(
+                        text = { Text(category.name) },
+                        onClick = { onCategorySelected(category.id); categoryMenuExpanded = false },
+                    )
+                }
+            }
+        }
+        if (categoriesLoading) {
+            Text("Загрузка категорий…", style = MaterialTheme.typography.bodySmall)
+        } else if (categoriesError || categories.isEmpty()) {
+            TextButton(onClick = onRetryCategories) { Text("Не удалось загрузить категории. Повторить") }
+        }
+        Spacer(Modifier.height(10.dp))
         OutlinedTextField(title, onTitleChange, label = { Text("Название") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         Spacer(Modifier.height(10.dp))
         OutlinedTextField(description, onDescriptionChange, label = { Text("Краткое описание") }, minLines = 2, maxLines = 4, modifier = Modifier.fillMaxWidth())

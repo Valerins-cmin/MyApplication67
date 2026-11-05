@@ -86,7 +86,7 @@ fun RegScreen(
             value = password,
             onValueChange = { password = it; errorMessage = null },
             label = { Text("Пароль") },
-            supportingText = { Text("Минимум 6 символов, хотя бы одна латинская буква") },
+            supportingText = { Text("От 6 до 128 символов") },
             singleLine = true,
             visualTransformation = PasswordVisualTransformation(),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
@@ -115,8 +115,7 @@ fun RegScreen(
                     !validLogin.matches(normalizedLogin) -> "Логин: 3–30 символов, латинские буквы, цифры и _."
                     !Patterns.EMAIL_ADDRESS.matcher(normalizedEmail).matches() -> "Введите корректную почту."
                     password.length < 6 -> "Пароль должен содержать не менее 6 символов."
-                    password.none { it in 'a'..'z' || it in 'A'..'Z' } ->
-                        "Добавьте в пароль хотя бы одну латинскую букву."
+                    password.length > 128 -> "Пароль должен содержать не более 128 символов."
                     password != repeatPassword -> "Пароли не совпадают."
                     else -> null
                 }

@@ -30,6 +30,14 @@ import org.json.JSONObject
 
 data class FeedReaction(val userId: String, val emoji: String)
 
+data class RecipeCategory(val id: Int, val name: String)
+
+private val localRecipeCategories = listOf(
+    "Завтраки", "Обеды", "Ужины", "Супы", "Салаты", "Закуски",
+    "Основные блюда", "Гарниры", "Блюда из мяса", "Блюда из рыбы",
+    "Вегетарианское", "Десерты", "Напитки", "Соусы", "Выпечка",
+).mapIndexed { index, name -> RecipeCategory(index + 1, name) }
+
 data class FeedPost(
     val id: String,
     val authorId: String,
@@ -39,6 +47,8 @@ data class FeedPost(
     val recipe: String,
     val imagePath: String,
     val createdAt: String,
+    val categoryId: Int? = null,
+    val commentCount: Int = 0,
     val reactions: List<FeedReaction> = emptyList(),
 )
 
@@ -51,7 +61,8 @@ data class FeedComment(
 
 interface FeedDataSource {
     suspend fun loadPosts(): List<FeedPost>
-    suspend fun publish(context: Context, authorId: String, authorLogin: String, image: Uri, title: String, description: String, recipe: String)
+    suspend fun loadCategories(): List<RecipeCategory>
+    suspend fun publish(context: Context, authorId: String, authorLogin: String, image: Uri, title: String, description: String, recipe: String, categoryId: Int)
     suspend fun toggleReaction(postId: String, userId: String, emoji: String)
     suspend fun loadComments(postId: String): List<FeedComment>
     suspend fun addComment(postId: String, authorId: String, authorLogin: String, body: String)
@@ -59,6 +70,13 @@ interface FeedDataSource {
 }
 
 class RemoteFeedRepository(private val client: SupabaseClient) : FeedDataSource {
+    override suspend fun loadCategories(): List<RecipeCategory> =
+        client.postgrest["feed_categories"].select().decodeList<JsonObject>()
+            .mapNotNull { row ->
+                val id = row.field("id")?.toIntOrNull() ?: return@mapNotNull null
+                RecipeCategory(id, row.field("name").orEmpty())
+            }.sortedBy { it.id }
+
     override suspend fun loadPosts(): List<FeedPost> {
         val posts = client.postgrest["feed_posts"].select().decodeList<JsonObject>()
         val reactions = client.postgrest["feed_reactions"].select().decodeList<JsonObject>()
@@ -74,6 +92,8 @@ class RemoteFeedRepository(private val client: SupabaseClient) : FeedDataSource 
                 recipe = row.field("recipe").orEmpty(),
                 imagePath = row.field("image_path").orEmpty(),
                 createdAt = row.field("created_at").orEmpty(),
+                categoryId = row.field("category_id")?.toIntOrNull(),
+                commentCount = row.field("comment_count")?.toIntOrNull() ?: 0,
                 reactions = reactions[id].orEmpty().map {
                     FeedReaction(it.field("user_id").orEmpty(), it.field("emoji").orEmpty())
                 },
@@ -89,6 +109,7 @@ class RemoteFeedRepository(private val client: SupabaseClient) : FeedDataSource 
         title: String,
         description: String,
         recipe: String,
+        categoryId: Int,
     ) {
         val file = FeedImageStorage.prepare(context, image)
         try {
@@ -103,6 +124,7 @@ class RemoteFeedRepository(private val client: SupabaseClient) : FeedDataSource 
                 put("title", title)
                 put("description", description)
                 put("recipe", recipe)
+                put("category_id", categoryId)
                 put("image_path", path)
             })
         } finally {
@@ -183,8 +205,11 @@ class LocalFeedRepository(context: Context, profileKey: String) : FeedDataSource
     private val preferences = context.getSharedPreferences("local_feed_$profileKey", Context.MODE_PRIVATE)
     private val imageDirectory = File(context.filesDir, "local_feed_images").apply { mkdirs() }
 
+    override suspend fun loadCategories(): List<RecipeCategory> = localRecipeCategories
+
     override suspend fun loadPosts(): List<FeedPost> {
         val reactions = readArray("reactions").objects().groupBy { it.optString("post_id") }
+        val commentCounts = readArray("comments").objects().groupingBy { it.optString("post_id") }.eachCount()
         return readArray("posts").objects().map { row ->
             val id = row.optString("id")
             FeedPost(
@@ -196,6 +221,8 @@ class LocalFeedRepository(context: Context, profileKey: String) : FeedDataSource
                 recipe = row.optString("recipe"),
                 imagePath = row.optString("image_path"),
                 createdAt = row.optString("created_at"),
+                categoryId = row.optInt("category_id").takeIf { it > 0 },
+                commentCount = commentCounts[id] ?: 0,
                 reactions = reactions[id].orEmpty().map {
                     FeedReaction(it.optString("user_id"), it.optString("emoji"))
                 },
@@ -211,6 +238,7 @@ class LocalFeedRepository(context: Context, profileKey: String) : FeedDataSource
         title: String,
         description: String,
         recipe: String,
+        categoryId: Int,
     ) {
         val prepared = FeedImageStorage.prepare(context, image)
         val destination = File(imageDirectory, "${UUID.randomUUID()}.jpg")
@@ -227,6 +255,7 @@ class LocalFeedRepository(context: Context, profileKey: String) : FeedDataSource
             .put("title", title)
             .put("description", description)
             .put("recipe", recipe)
+            .put("category_id", categoryId)
             .put("image_path", destination.absolutePath)
             .put("created_at", Instant.now().toString()))
         writeArray("posts", posts)
