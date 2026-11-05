@@ -62,6 +62,7 @@ fun NawHostScreen(
     loginHint: String?,
     profileKey: String,
     profileRepository: ProfileDataSource?,
+    feedRepository: FeedDataSource? = null,
     darkTheme: Boolean,
     onDarkThemeChange: (Boolean) -> Unit,
     onExitPreview: (() -> Unit)? = null,
@@ -76,6 +77,9 @@ fun NawHostScreen(
             loginHint = loginHint ?: "guest",
             accountEmail = accountEmail,
         )
+    }
+    val feedSource = remember(feedRepository, context, profileKey) {
+        feedRepository ?: LocalFeedRepository(context, profileKey)
     }
     val avatarFile = remember(context, profileKey) { AvatarStorage.fileFor(context, profileKey) }
     var avatarVersion by remember(profileKey) { mutableIntStateOf(0) }
@@ -198,6 +202,9 @@ fun NawHostScreen(
                     modifier = screenModifier,
                     selectedCategory = feedCategory,
                     onCategorySelected = { feedCategory = it },
+                    dataSource = feedSource,
+                    currentUserId = profileKey,
+                    currentLogin = homeLogin ?: loginHint.orEmpty(),
                 )
                 1 -> HomeScreen(
                     modifier = screenModifier,

@@ -27,6 +27,7 @@ import io.github.jan.supabase.auth.auth
 import io.github.jan.supabase.auth.status.SessionStatus
 import io.github.jan.supabase.createSupabaseClient
 import io.github.jan.supabase.postgrest.Postgrest
+import io.github.jan.supabase.storage.Storage
 import org.json.JSONObject
 
 class MainActivity : ComponentActivity() {
@@ -37,6 +38,7 @@ class MainActivity : ComponentActivity() {
         ) {
             install(Auth)
             install(Postgrest)
+            install(Storage)
         }
     }
 
@@ -80,6 +82,7 @@ private fun AppRoot(
     var pendingLogin by rememberSaveable { mutableStateOf<String?>(null) }
     val repository = remember(client) { AuthRepository(client) }
     val profileRepository = remember(client) { RemoteProfileRepository(client) }
+    val feedRepository = remember(client) { RemoteFeedRepository(client) }
 
     if (status is SessionStatus.Authenticated) {
         val session = (status as SessionStatus.Authenticated).session
@@ -89,6 +92,7 @@ private fun AppRoot(
             loginHint = null,
             profileKey = user?.id ?: tokenSubject(session.accessToken) ?: "account",
             profileRepository = profileRepository,
+            feedRepository = feedRepository,
             darkTheme = darkTheme,
             onDarkThemeChange = onDarkThemeChange,
             onSignOut = {
