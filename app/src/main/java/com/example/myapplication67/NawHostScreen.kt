@@ -18,9 +18,9 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.Feed
 import androidx.compose.material.icons.outlined.Calculate
 import androidx.compose.material.icons.outlined.Home
-import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -29,6 +29,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -49,7 +50,7 @@ import kotlinx.coroutines.launch
 private data class MainTab(val title: String, val icon: ImageVector)
 
 private val mainTabs = listOf(
-    MainTab("Поиск", Icons.Outlined.Search),
+    MainTab("Лента", Icons.AutoMirrored.Outlined.Feed),
     MainTab("Главная", Icons.Outlined.Home),
     MainTab("Калькулятор", Icons.Outlined.Calculate),
 )
@@ -93,6 +94,16 @@ fun NawHostScreen(
     var selectedTab by rememberSaveable { mutableIntStateOf(1) }
     var showAccount by rememberSaveable { mutableStateOf(false) }
     var accountPage by rememberSaveable { mutableStateOf("profile") }
+    var homeLogin by remember(dataSource) { mutableStateOf(loginHint) }
+    var searchQuery by rememberSaveable { mutableStateOf("") }
+    var feedCategory by rememberSaveable { mutableStateOf(FeedCategory.MAIN) }
+
+    LaunchedEffect(dataSource, showAccount) {
+        if (!showAccount) {
+            runCatching { dataSource.load().info.login }
+                .onSuccess { homeLogin = it }
+        }
+    }
 
     val accountBack: () -> Unit = {
         when (accountPage) {
@@ -129,7 +140,7 @@ fun NawHostScreen(
                     )
                 } else {
                     Text(
-                        previewTitle ?: mainTabs[selectedTab].title,
+                        if (selectedTab == 1) previewTitle ?: mainTabs[selectedTab].title else mainTabs[selectedTab].title,
                         style = MaterialTheme.typography.titleLarge,
                     )
                     Spacer(Modifier.weight(1f))
@@ -183,8 +194,17 @@ fun NawHostScreen(
             )
         } else {
             when (selectedTab) {
-                0 -> Box(screenModifier)
-                1 -> Box(screenModifier)
+                0 -> FeedScreen(
+                    modifier = screenModifier,
+                    selectedCategory = feedCategory,
+                    onCategorySelected = { feedCategory = it },
+                )
+                1 -> HomeScreen(
+                    modifier = screenModifier,
+                    login = homeLogin ?: accountEmail?.substringBefore('@') ?: "Пользователь",
+                    searchQuery = searchQuery,
+                    onSearchQueryChange = { searchQuery = it },
+                )
                 2 -> Box(screenModifier)
             }
         }
