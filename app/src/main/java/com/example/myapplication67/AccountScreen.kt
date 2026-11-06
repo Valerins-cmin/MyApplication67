@@ -3,8 +3,11 @@ package com.example.myapplication67
 import android.content.Context
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,23 +27,34 @@ import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.CameraAlt
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.Restore
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -48,6 +62,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -62,8 +77,29 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
 import java.io.File
 import java.time.LocalDate
-import java.util.Locale
 import kotlinx.coroutines.launch
+import android.graphics.Bitmap
+import android.graphics.ImageDecoder
+import android.net.Uri
+import io.github.jan.supabase.SupabaseClient
+import io.github.jan.supabase.postgrest.postgrest
+import java.security.MessageDigest
+import java.time.Instant
+import java.util.UUID
+import kotlin.math.max
+import kotlin.math.roundToInt
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import org.json.JSONArray
+import org.json.JSONObject
+import com.example.myapplication67.ui.theme.ThemeAccent
+import com.example.myapplication67.ui.theme.ThemeMode
 
 @Composable
 fun AvatarBadge(
@@ -104,6 +140,7 @@ fun AvatarBadge(
 fun AccountScreen(
     modifier: Modifier = Modifier,
     dataSource: ProfileDataSource,
+    feedDataSource: FeedDataSource,
     profileKey: String,
     page: String,
     onPageChange: (String) -> Unit,
@@ -111,8 +148,10 @@ fun AccountScreen(
     avatarFile: File,
     avatarVersion: Int,
     onPickPhoto: () -> Unit,
-    darkTheme: Boolean,
-    onDarkThemeChange: (Boolean) -> Unit,
+    themeMode: ThemeMode,
+    onThemeModeChange: (ThemeMode) -> Unit,
+    themeAccent: ThemeAccent,
+    onThemeAccentChange: (ThemeAccent) -> Unit,
     onExitPreview: (() -> Unit)?,
     onSignOut: (suspend () -> Unit)?,
 ) {
@@ -122,6 +161,11 @@ fun AccountScreen(
     }
     val scope = rememberCoroutineScope()
     var snapshot by remember(dataSource) { mutableStateOf<ProfileSnapshot?>(null) }
+    var ownFeedPosts by remember(feedDataSource, profileKey) { mutableStateOf<List<FeedPost>>(emptyList()) }
+    var feedCategories by remember(feedDataSource) { mutableStateOf<List<RecipeCategory>>(emptyList()) }
+    var feedLoading by remember(feedDataSource, profileKey) { mutableStateOf(true) }
+    var feedError by remember(feedDataSource, profileKey) { mutableStateOf(false) }
+    var feedReloadKey by remember(feedDataSource) { mutableStateOf(0) }
     var loading by remember(dataSource) { mutableStateOf(true) }
     var reloadKey by remember(dataSource) { mutableStateOf(0) }
     var busy by remember { mutableStateOf(false) }
@@ -150,6 +194,16 @@ fun AccountScreen(
         } finally {
             loading = false
         }
+    }
+
+    LaunchedEffect(feedDataSource, profileKey, feedReloadKey) {
+        feedLoading = true
+        runCatching { feedDataSource.loadOwnPosts(profileKey) }
+            .onSuccess { ownFeedPosts = it; feedError = false }
+            .onFailure { feedError = true }
+        runCatching { feedDataSource.loadCategories() }
+            .onSuccess { feedCategories = it }
+        feedLoading = false
     }
 
     fun change(action: suspend () -> Unit, onSuccess: () -> Unit = {}) {
@@ -192,7 +246,7 @@ fun AccountScreen(
                 when (page) {
                     "edit" -> EditProfileContent(
                         login = loginDraft,
-                        onLoginChange = { loginDraft = it.take(30) },
+                        onLoginChange = { loginDraft = it },
                         about = aboutDraft,
                         onAboutChange = { aboutDraft = it.take(500) },
                         phone = phoneDraft,
@@ -202,9 +256,9 @@ fun AccountScreen(
                         busy = busy,
                         onSave = {
                             val birthday = birthdayDraft.trim().ifBlank { null }
-                            val normalizedLogin = loginDraft.trim().lowercase(Locale.ROOT)
-                            if (!Regex("^[a-z0-9_]{3,30}$").matches(normalizedLogin)) {
-                                errorMessage = "Логин: 3–30 символов, латинские буквы, цифры и _."
+                            val normalizedLogin = LoginRules.normalize(loginDraft)
+                            if (!LoginRules.isValid(normalizedLogin)) {
+                                errorMessage = "Логин должен содержать от 3 до 30 символов."
                             } else if (birthday != null && runCatching { LocalDate.parse(birthday) }.isFailure) {
                                 errorMessage = "Введите дату рождения в формате ГГГГ-ММ-ДД."
                             } else {
@@ -223,8 +277,10 @@ fun AccountScreen(
                         },
                     )
                     "settings" -> SettingsContent(
-                        darkTheme = darkTheme,
-                        onDarkThemeChange = onDarkThemeChange,
+                        themeMode = themeMode,
+                        onThemeModeChange = onThemeModeChange,
+                        themeAccent = themeAccent,
+                        onThemeAccentChange = onThemeAccentChange,
                         notificationsEnabled = notificationsEnabled,
                         onNotificationsChange = { enabled ->
                             notificationsEnabled = enabled
@@ -271,6 +327,12 @@ fun AccountScreen(
                     )
                     else -> ProfileContent(
                         snapshot = current,
+                        ownFeedPosts = ownFeedPosts,
+                        feedDataSource = feedDataSource,
+                        feedCategories = feedCategories,
+                        feedLoading = feedLoading,
+                        feedError = feedError,
+                        onFeedRetry = { feedReloadKey++ },
                         previewTitle = previewTitle,
                         avatarFile = avatarFile,
                         avatarVersion = avatarVersion,
@@ -290,6 +352,12 @@ fun AccountScreen(
                         onSetArchived = { post ->
                             change(action = { dataSource.setArchived(current.info.id, post.id, !post.archived) })
                         },
+                        onSetShowPublicly = { post ->
+                            change(action = { dataSource.setShowPublicly(current.info.id, post.id, !post.showPublicly) })
+                        },
+                        onDeletePost = { post ->
+                            change(action = { dataSource.deletePost(current.info.id, post.id) })
+                        },
                         busy = busy,
                     )
                 }
@@ -305,6 +373,12 @@ fun AccountScreen(
 @Composable
 private fun ProfileContent(
     snapshot: ProfileSnapshot,
+    ownFeedPosts: List<FeedPost>,
+    feedDataSource: FeedDataSource,
+    feedCategories: List<RecipeCategory>,
+    feedLoading: Boolean,
+    feedError: Boolean,
+    onFeedRetry: () -> Unit,
     previewTitle: String?,
     avatarFile: File,
     avatarVersion: Int,
@@ -316,8 +390,11 @@ private fun ProfileContent(
     newestFirst: Boolean,
     onAddPost: () -> Unit,
     onSetArchived: (RecipePost) -> Unit,
+    onSetShowPublicly: (RecipePost) -> Unit,
+    onDeletePost: (RecipePost) -> Unit,
     busy: Boolean,
 ) {
+    var openedFeedPost by remember { mutableStateOf<FeedPost?>(null) }
     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         AvatarBadge(
             avatarFile = avatarFile,
@@ -330,6 +407,7 @@ private fun ProfileContent(
     Text(
         "@${snapshot.info.login}",
         style = MaterialTheme.typography.headlineMedium,
+        color = MaterialTheme.colorScheme.onBackground,
         fontWeight = FontWeight.Bold,
         textAlign = TextAlign.Center,
         modifier = Modifier.fillMaxWidth(),
@@ -374,11 +452,12 @@ private fun ProfileContent(
         if (showArchive) {
             when {
                 previewTitle != null -> "Архив хранится только на этом устройстве"
-                snapshot.archivePublic -> "Архив виден всем"
+                snapshot.archivePublic -> "Другим видны публикации с галочкой «Показывать»"
                 else -> "Архив виден только вам"
             }
         } else {
-            if (previewTitle != null) "Рецепты хранятся только на этом устройстве" else "Публикации видны только вам"
+            if (previewTitle != null) "Рецепты хранятся только на этом устройстве"
+            else "Карточки из ленты видны всем, рецепты профиля — только вам"
         },
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -386,9 +465,24 @@ private fun ProfileContent(
         textAlign = TextAlign.Center,
     )
     Spacer(Modifier.height(18.dp))
-    val posts = snapshot.posts.filter { it.archived == showArchive }
-        .let { if (newestFirst) it else it.reversed() }
-    if (posts.isEmpty()) {
+    if (!showArchive && feedLoading && ownFeedPosts.isEmpty()) {
+        Box(Modifier.fillMaxWidth().height(80.dp), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator()
+        }
+    }
+    if (!showArchive && feedError) {
+        OutlinedButton(onClick = onFeedRetry, modifier = Modifier.fillMaxWidth()) {
+            Text("Не удалось загрузить публикации из ленты. Повторить")
+        }
+        Spacer(Modifier.height(12.dp))
+    }
+    val posts = buildList {
+        if (!showArchive) ownFeedPosts.forEach { add(ProfileCardItem("feed:${it.id}", it.createdAt, feedPost = it)) }
+        snapshot.posts.filter { it.archived == showArchive }.forEach {
+            add(ProfileCardItem("recipe:${it.id}", it.createdAt, recipePost = it))
+        }
+    }.sortedByDescending { it.createdAt }.let { if (newestFirst) it else it.reversed() }
+    if (posts.isEmpty() && !(!showArchive && feedLoading)) {
         Card(shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
             Text(
                 if (showArchive) "Архив пока пуст" else "Здесь пока нет рецептов",
@@ -400,13 +494,29 @@ private fun ProfileContent(
     } else {
         posts.chunked(2).forEach { pair ->
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                pair.forEach { post ->
-                    RecipePostCard(
-                        post = post,
-                        onSetArchived = { onSetArchived(post) },
-                        busy = busy,
-                        modifier = Modifier.weight(1f),
-                    )
+                pair.forEach { item ->
+                    key(item.id) {
+                        val feedPost = item.feedPost
+                        val recipePost = item.recipePost
+                        if (feedPost != null) {
+                            FeedProfileCard(
+                                post = feedPost,
+                                dataSource = feedDataSource,
+                                categoryName = feedCategories.firstOrNull { it.id == feedPost.categoryId }?.name,
+                                onOpen = { openedFeedPost = feedPost },
+                                modifier = Modifier.weight(1f),
+                            )
+                        } else if (recipePost != null) {
+                            RecipePostCard(
+                                post = recipePost,
+                                onSetArchived = { onSetArchived(recipePost) },
+                                onSetShowPublicly = { onSetShowPublicly(recipePost) },
+                                onDelete = { onDeletePost(recipePost) },
+                                busy = busy,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
                 }
                 if (pair.size == 1) Spacer(Modifier.weight(1f))
             }
@@ -419,6 +529,42 @@ private fun ProfileContent(
             Icon(Icons.Outlined.Add, contentDescription = null)
             Spacer(Modifier.size(8.dp))
             Text("Добавить рецепт")
+        }
+    }
+    openedFeedPost?.let { post ->
+        FeedRecipeDetailDialog(
+            post = post,
+            dataSource = feedDataSource,
+            categoryName = feedCategories.firstOrNull { it.id == post.categoryId }?.name,
+            onDismiss = { openedFeedPost = null },
+        )
+    }
+}
+
+private data class ProfileCardItem(
+    val id: String,
+    val createdAt: String,
+    val feedPost: FeedPost? = null,
+    val recipePost: RecipePost? = null,
+)
+
+@Composable
+private fun FeedProfileCard(
+    post: FeedPost,
+    dataSource: FeedDataSource,
+    categoryName: String?,
+    onOpen: () -> Unit,
+    modifier: Modifier,
+) {
+    Card(onClick = onOpen, shape = RoundedCornerShape(18.dp), modifier = modifier) {
+        Column {
+            FeedPostImage(dataSource, post.imagePath, height = 92.dp)
+            Column(Modifier.padding(12.dp)) {
+                Text(post.title, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall)
+                categoryName?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary) }
+                Text(post.createdAt.take(10), style = MaterialTheme.typography.bodySmall)
+                Text("Комментарии: ${post.commentCount}", style = MaterialTheme.typography.bodySmall)
+            }
         }
     }
 }
@@ -446,7 +592,7 @@ private fun ProfileAction(
 @Composable
 private fun ProfileInfoRow(label: String, value: String) {
     Column {
-        Text(value, style = MaterialTheme.typography.bodyLarge)
+        Text(value, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface)
         Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
@@ -461,12 +607,22 @@ private fun SectionChoice(label: String, selected: Boolean, onClick: () -> Unit,
             .padding(vertical = 10.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Text(label, style = MaterialTheme.typography.labelLarge, textAlign = TextAlign.Center)
+        Text(label, style = MaterialTheme.typography.labelLarge, textAlign = TextAlign.Center,
+            color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onBackground)
     }
 }
 
 @Composable
-private fun RecipePostCard(post: RecipePost, onSetArchived: () -> Unit, busy: Boolean, modifier: Modifier) {
+private fun RecipePostCard(
+    post: RecipePost,
+    onSetArchived: () -> Unit,
+    onSetShowPublicly: () -> Unit,
+    onDelete: () -> Unit,
+    busy: Boolean,
+    modifier: Modifier,
+) {
+    var menuExpanded by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
     Card(shape = RoundedCornerShape(18.dp), modifier = modifier) {
         Column {
             Box(
@@ -474,6 +630,33 @@ private fun RecipePostCard(post: RecipePost, onSetArchived: () -> Unit, busy: Bo
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(Icons.AutoMirrored.Outlined.MenuBook, contentDescription = null, modifier = Modifier.size(42.dp))
+                if (post.archived) {
+                    Box(modifier = Modifier.align(Alignment.TopEnd)) {
+                        IconButton(onClick = { menuExpanded = true }, enabled = !busy) {
+                            Icon(Icons.Outlined.MoreVert, contentDescription = "Действия с публикацией")
+                        }
+                        DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Показывать") },
+                                trailingIcon = {
+                                    Checkbox(
+                                        checked = post.showPublicly,
+                                        onCheckedChange = null,
+                                        enabled = !busy,
+                                    )
+                                },
+                                onClick = { menuExpanded = false; onSetShowPublicly() },
+                                enabled = !busy,
+                            )
+                            HorizontalDivider()
+                            DropdownMenuItem(
+                                text = { Text("Удалить", color = MaterialTheme.colorScheme.error) },
+                                onClick = { menuExpanded = false; confirmDelete = true },
+                                enabled = !busy,
+                            )
+                        }
+                    }
+                }
             }
             Text(
                 post.title,
@@ -497,6 +680,19 @@ private fun RecipePostCard(post: RecipePost, onSetArchived: () -> Unit, busy: Bo
             }
         }
     }
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Удалить публикацию?") },
+            text = { Text("Рецепт будет удалён без возможности восстановления.") },
+            confirmButton = {
+                TextButton(onClick = { confirmDelete = false; onDelete() }, enabled = !busy) {
+                    Text("Удалить", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Отмена") } },
+        )
+    }
 }
 
 @Composable
@@ -518,7 +714,7 @@ private fun EditProfileContent(
         value = login,
         onValueChange = onLoginChange,
         label = { Text("Логин") },
-        supportingText = { Text("Латинские буквы, цифры и _; минимум 3 символа") },
+        supportingText = { Text("От 3 до 30 символов; буквы и знаки любые") },
         singleLine = true,
         modifier = Modifier.fillMaxWidth(),
     )
@@ -557,8 +753,10 @@ private fun EditProfileContent(
 
 @Composable
 private fun SettingsContent(
-    darkTheme: Boolean,
-    onDarkThemeChange: (Boolean) -> Unit,
+    themeMode: ThemeMode,
+    onThemeModeChange: (ThemeMode) -> Unit,
+    themeAccent: ThemeAccent,
+    onThemeAccentChange: (ThemeAccent) -> Unit,
     notificationsEnabled: Boolean,
     onNotificationsChange: (Boolean) -> Unit,
     onFeedSettings: () -> Unit,
@@ -569,7 +767,41 @@ private fun SettingsContent(
     var signingOut by remember { mutableStateOf(false) }
     var signOutError by remember { mutableStateOf(false) }
     Text("Внешний вид", style = MaterialTheme.typography.titleMedium)
-    SettingSwitch("Тёмная тема", darkTheme, onDarkThemeChange)
+    Spacer(Modifier.height(12.dp))
+    Card(shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.selectableGroup().padding(vertical = 4.dp)) {
+            ThemeMode.entries.forEach { mode ->
+                Row(
+                    modifier = Modifier.fillMaxWidth()
+                        .selectable(selected = themeMode == mode, onClick = { onThemeModeChange(mode) }, role = Role.RadioButton)
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(mode.title, modifier = Modifier.weight(1f))
+                    RadioButton(selected = themeMode == mode, onClick = null)
+                }
+            }
+        }
+    }
+    Spacer(Modifier.height(22.dp))
+    Text("Цвет интерфейса", style = MaterialTheme.typography.titleMedium)
+    Text("По умолчанию — мягкий светло-пурпурный градиент", style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Spacer(Modifier.height(12.dp))
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        ThemeAccent.entries.chunked(4).forEach { row ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                row.forEach { accent ->
+                    ThemeSwatch(
+                        accent = accent,
+                        selected = themeAccent == accent,
+                        onClick = { onThemeAccentChange(accent) },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+        }
+    }
     Spacer(Modifier.height(22.dp))
     Text("Уведомления", style = MaterialTheme.typography.titleMedium)
     SettingSwitch("Разрешить уведомления приложения", notificationsEnabled, onNotificationsChange)
@@ -615,6 +847,50 @@ private fun SettingsContent(
 }
 
 @Composable
+private fun ThemeSwatch(
+    accent: ThemeAccent,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Card(
+        onClick = onClick,
+        modifier = modifier.height(108.dp),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (selected) MaterialTheme.colorScheme.secondaryContainer
+            else MaterialTheme.colorScheme.surfaceContainerLow,
+        ),
+        border = if (selected) BorderStroke(1.dp, MaterialTheme.colorScheme.primary) else null,
+    ) {
+        Column(
+            modifier = Modifier.fillMaxSize().padding(6.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Box(Modifier.size(50.dp)) {
+                Column(Modifier.fillMaxSize().clip(CircleShape)) {
+                    Box(Modifier.fillMaxWidth().weight(1f).background(accent.lightContainer))
+                    Box(Modifier.fillMaxWidth().weight(1f).background(accent.lightPrimary))
+                }
+                if (selected) {
+                    Box(
+                        Modifier.align(Alignment.TopEnd).size(19.dp)
+                            .background(MaterialTheme.colorScheme.primary, CircleShape),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(Icons.Outlined.Check, contentDescription = "Выбрано",
+                            tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(14.dp))
+                    }
+                }
+            }
+            Spacer(Modifier.height(5.dp))
+            Text(accent.title, textAlign = TextAlign.Center, style = MaterialTheme.typography.labelSmall,
+                maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+@Composable
 private fun FeedSettingsContent(
     archivePublic: Boolean,
     onArchivePublicChange: (Boolean) -> Unit,
@@ -634,7 +910,7 @@ private fun FeedSettingsContent(
         if (isPreview) {
             "Войдите в аккаунт, чтобы открыть архив другим пользователям."
         } else {
-            "Когда включено, другие пользователи смогут читать рецепты из архива."
+            "Когда включено, другие пользователи видят архивные рецепты с галочкой «Показывать»."
         },
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -681,5 +957,260 @@ private fun NewPostContent(
     Spacer(Modifier.height(22.dp))
     Button(onClick = onSave, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
         Text(if (busy) "Сохранение…" else "Добавить рецепт")
+    }
+}
+
+data class ProfileInfo(
+    val id: String,
+    val login: String,
+    val email: String?,
+    val about: String = "",
+    val phone: String? = null,
+    val birthday: String? = null,
+)
+
+data class RecipePost(
+    val id: String,
+    val title: String,
+    val body: String,
+    val archived: Boolean,
+    val showPublicly: Boolean = true,
+    val createdAt: String,
+)
+
+data class ProfileSnapshot(
+    val info: ProfileInfo,
+    val archivePublic: Boolean,
+    val posts: List<RecipePost>,
+)
+
+interface ProfileDataSource {
+    suspend fun load(): ProfileSnapshot
+    suspend fun saveInfo(info: ProfileInfo)
+    suspend fun setArchivePublic(ownerId: String, enabled: Boolean)
+    suspend fun addPost(ownerId: String, title: String, body: String)
+    suspend fun setArchived(ownerId: String, postId: String, archived: Boolean)
+    suspend fun setShowPublicly(ownerId: String, postId: String, enabled: Boolean)
+    suspend fun deletePost(ownerId: String, postId: String)
+}
+
+class RemoteProfileRepository(private val client: SupabaseClient) : ProfileDataSource {
+    override suspend fun load(): ProfileSnapshot {
+        val row = client.postgrest["users"].select().decodeList<JsonObject>().singleOrNull()
+            ?: error("Профиль не найден. Попробуйте войти заново.")
+        val id = row.string("id") ?: error("У профиля отсутствует ID")
+        val visibility = client.postgrest["archive_settings"].select {
+            filter { eq("owner_id", id) }
+        }.decodeList<JsonObject>().firstOrNull()
+        val posts = client.postgrest["recipes"].select {
+            filter { eq("owner_id", id) }
+        }.decodeList<JsonObject>().map { post ->
+            RecipePost(
+                id = post.string("id").orEmpty(),
+                title = post.string("title").orEmpty(),
+                body = post.string("body").orEmpty(),
+                archived = post.boolean("archived"),
+                showPublicly = post.boolean("show_publicly"),
+                createdAt = post.string("created_at").orEmpty(),
+            )
+        }.sortedByDescending { it.createdAt }
+
+        return ProfileSnapshot(
+            info = ProfileInfo(
+                id = id,
+                login = row.string("login").orEmpty(),
+                email = row.string("gmail"),
+                about = row.string("about").orEmpty(),
+                phone = row.string("phone"),
+                birthday = row.string("birthday"),
+            ),
+            archivePublic = visibility?.boolean("is_public") ?: false,
+            posts = posts,
+        )
+    }
+
+    override suspend fun saveInfo(info: ProfileInfo) {
+        client.postgrest["users"].update({
+            set("login", info.login)
+            set("about", info.about)
+            set("phone", info.phone)
+            set("birthday", info.birthday)
+        }) {
+            filter { eq("id", info.id) }
+        }
+    }
+
+    override suspend fun setArchivePublic(ownerId: String, enabled: Boolean) {
+        client.postgrest["archive_settings"].upsert(
+            buildJsonObject {
+                put("owner_id", ownerId)
+                put("is_public", enabled)
+            },
+        ) { onConflict = "owner_id" }
+    }
+
+    override suspend fun addPost(ownerId: String, title: String, body: String) {
+        client.postgrest["recipes"].insert(buildJsonObject {
+            put("owner_id", ownerId)
+            put("title", title)
+            put("body", body)
+        })
+    }
+
+    override suspend fun setArchived(ownerId: String, postId: String, archived: Boolean) {
+        client.postgrest["recipes"].update({ set("archived", archived) }) {
+            filter {
+                eq("id", postId)
+                eq("owner_id", ownerId)
+            }
+        }
+    }
+
+    override suspend fun deletePost(ownerId: String, postId: String) {
+        client.postgrest["recipes"].delete {
+            filter {
+                eq("id", postId)
+                eq("owner_id", ownerId)
+                eq("archived", true)
+            }
+        }
+    }
+
+    override suspend fun setShowPublicly(ownerId: String, postId: String, enabled: Boolean) {
+        client.postgrest["recipes"].update({ set("show_publicly", enabled) }) {
+            filter {
+                eq("id", postId)
+                eq("owner_id", ownerId)
+                eq("archived", true)
+            }
+        }
+    }
+}
+
+class LocalProfileRepository(
+    context: Context,
+    private val profileKey: String,
+    private val loginHint: String,
+    private val accountEmail: String?,
+) : ProfileDataSource {
+    private val preferences = context.getSharedPreferences("local_profiles", Context.MODE_PRIVATE)
+    private val prefix = "$profileKey."
+
+    override suspend fun load(): ProfileSnapshot = ProfileSnapshot(
+        info = ProfileInfo(
+            id = profileKey,
+            login = preferences.getString("${prefix}login", loginHint).orEmpty(),
+            email = accountEmail,
+            about = preferences.getString("${prefix}about", "").orEmpty(),
+            phone = preferences.getString("${prefix}phone", null),
+            birthday = preferences.getString("${prefix}birthday", null),
+        ),
+        archivePublic = preferences.getBoolean("${prefix}archive_public", false),
+        posts = readPosts(),
+    )
+
+    override suspend fun saveInfo(info: ProfileInfo) {
+        preferences.edit()
+            .putString("${prefix}login", info.login)
+            .putString("${prefix}about", info.about)
+            .putString("${prefix}phone", info.phone)
+            .putString("${prefix}birthday", info.birthday)
+            .apply()
+    }
+
+    override suspend fun setArchivePublic(ownerId: String, enabled: Boolean) {
+        preferences.edit().putBoolean("${prefix}archive_public", enabled).apply()
+    }
+
+    override suspend fun addPost(ownerId: String, title: String, body: String) {
+        val posts = readPosts() + RecipePost(
+            id = UUID.randomUUID().toString(),
+            title = title,
+            body = body,
+            archived = false,
+            createdAt = Instant.now().toString(),
+        )
+        writePosts(posts)
+    }
+
+    override suspend fun setArchived(ownerId: String, postId: String, archived: Boolean) {
+        writePosts(readPosts().map { post ->
+            if (post.id == postId) post.copy(archived = archived) else post
+        })
+    }
+
+    override suspend fun deletePost(ownerId: String, postId: String) {
+        writePosts(readPosts().filterNot { it.id == postId && it.archived })
+    }
+
+    override suspend fun setShowPublicly(ownerId: String, postId: String, enabled: Boolean) {
+        writePosts(readPosts().map { post ->
+            if (post.id == postId && post.archived) post.copy(showPublicly = enabled) else post
+        })
+    }
+
+    private fun readPosts(): List<RecipePost> = try {
+        val array = JSONArray(preferences.getString("${prefix}posts", "[]"))
+        (0 until array.length()).map { index ->
+            val row = array.getJSONObject(index)
+            RecipePost(
+                id = row.getString("id"),
+                title = row.getString("title"),
+                body = row.optString("body"),
+                archived = row.optBoolean("archived"),
+                showPublicly = row.optBoolean("show_publicly", true),
+                createdAt = row.getString("created_at"),
+            )
+        }.sortedByDescending { it.createdAt }
+    } catch (_: Exception) {
+        emptyList()
+    }
+
+    private fun writePosts(posts: List<RecipePost>) {
+        val array = JSONArray()
+        posts.forEach { post ->
+            array.put(JSONObject()
+                .put("id", post.id)
+                .put("title", post.title)
+                .put("body", post.body)
+                .put("archived", post.archived)
+                .put("show_publicly", post.showPublicly)
+                .put("created_at", post.createdAt))
+        }
+        preferences.edit().putString("${prefix}posts", array.toString()).apply()
+    }
+}
+
+private fun JsonObject.string(key: String): String? = this[key]?.jsonPrimitive?.contentOrNull
+
+private fun JsonObject.boolean(key: String): Boolean = this[key]?.jsonPrimitive?.booleanOrNull ?: false
+
+object AvatarStorage {
+    fun fileFor(context: Context, profileKey: String): File {
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(profileKey.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+        return File(File(context.filesDir, "avatars"), "$digest.jpg")
+    }
+
+    suspend fun save(context: Context, profileKey: String, uri: Uri) = withContext(Dispatchers.IO) {
+        val source = ImageDecoder.createSource(context.contentResolver, uri)
+        val bitmap = ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+            val width = info.size.width
+            val height = info.size.height
+            val scale = (512f / max(width, height)).coerceAtMost(1f)
+            decoder.setTargetSize(
+                (width * scale).roundToInt().coerceAtLeast(1),
+                (height * scale).roundToInt().coerceAtLeast(1),
+            )
+        }
+        val file = fileFor(context, profileKey)
+        file.parentFile?.mkdirs()
+        file.outputStream().use { output ->
+            if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 85, output)) {
+                error("Не удалось сохранить изображение")
+            }
+        }
     }
 }

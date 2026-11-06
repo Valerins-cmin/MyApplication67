@@ -20,36 +20,46 @@ export default {
     }
 
     const fields = body as Record<string, unknown>;
-    const login = typeof fields.login === "string" ? fields.login.trim().toLowerCase() : "";
+    const identifier = typeof fields.login === "string" ? fields.login.trim().toLowerCase() : "";
     const password = fields.password;
-    if (!/^[a-z0-9_]{3,30}$/.test(login) || typeof password !== "string" ||
+    const loginLength = Array.from(identifier).length;
+    const validLogin = loginLength >= 3 && loginLength <= 30;
+    const looksLikeEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identifier);
+    if ((!validLogin && !looksLikeEmail) || identifier.length > 254 || typeof password !== "string" ||
         password.length === 0 || password.length > 1024) {
       return Response.json({ error: "Invalid credentials" }, { status: 401, headers: noStore });
     }
 
-    const { data: profile, error: lookupError } = await context.supabaseAdmin
-      .from("User")
-      .select("gmail")
-      .eq("login", login)
-      .maybeSingle();
-
-    if (lookupError) {
-      return Response.json({ error: "Login unavailable" }, { status: 503, headers: noStore });
+    let profile: { gmail: string } | null = null;
+    if (validLogin) {
+      const lookup = await context.supabaseAdmin
+        .from("users")
+        .select("gmail")
+        .eq("login", identifier)
+        .maybeSingle();
+      if (lookup.error) {
+        return Response.json({ error: "Login unavailable" }, { status: 503, headers: noStore });
+      }
+      profile = lookup.data;
     }
 
-    // An Auth request is made for unknown logins too, so failed attempts follow
-    // the same Auth rate limits and do not reveal whether a login exists.
-    const email = profile?.gmail ?? "missing-user@example.invalid";
-    const { data, error } = await context.supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
+    const emails = profile ? [profile.gmail] : [];
+    if (looksLikeEmail && !emails.includes(identifier)) emails.push(identifier);
+    // Unknown logins still make an Auth request to avoid revealing account existence.
+    if (emails.length === 0) emails.push("missing-user@example.invalid");
 
-    if (!profile || error || !data.session) {
+    let session = null;
+    for (const email of emails) {
+      const result = await context.supabase.auth.signInWithPassword({ email, password });
+      if (!result.error && result.data.session) {
+        session = result.data.session;
+        break;
+      }
+    }
+    if (!session) {
       return Response.json({ error: "Invalid credentials" }, { status: 401, headers: noStore });
     }
 
-    const session = data.session;
     return Response.json({
       access_token: session.access_token,
       refresh_token: session.refresh_token,

@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.BitmapFactory
 import android.graphics.ImageDecoder
 import android.graphics.Paint
 import android.graphics.Rect
@@ -14,6 +15,9 @@ import io.github.jan.supabase.storage.storage
 import io.ktor.http.ContentType
 import java.io.File
 import java.net.HttpURLConnection
+import java.net.Inet6Address
+import java.net.InetAddress
+import java.net.URI
 import java.net.URL
 import java.security.MessageDigest
 import java.time.Instant
@@ -29,6 +33,11 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 data class FeedReaction(val userId: String, val emoji: String)
+
+sealed interface FeedImageInput {
+    data class Photo(val uri: Uri) : FeedImageInput
+    data class Link(val url: String) : FeedImageInput
+}
 
 data class RecipeCategory(val id: Int, val name: String)
 
@@ -61,8 +70,11 @@ data class FeedComment(
 
 interface FeedDataSource {
     suspend fun loadPosts(): List<FeedPost>
+    suspend fun loadOwnPosts(authorId: String): List<FeedPost>
     suspend fun loadCategories(): List<RecipeCategory>
-    suspend fun publish(context: Context, authorId: String, authorLogin: String, image: Uri, title: String, description: String, recipe: String, categoryId: Int)
+    suspend fun loadCategoryPosts(categoryId: Int): List<FeedPost>
+    suspend fun searchPosts(query: String): List<FeedPost>
+    suspend fun publish(context: Context, authorId: String, authorLogin: String, image: FeedImageInput, title: String, description: String, recipe: String, categoryId: Int)
     suspend fun toggleReaction(postId: String, userId: String, emoji: String)
     suspend fun loadComments(postId: String): List<FeedComment>
     suspend fun addComment(postId: String, authorId: String, authorLogin: String, body: String)
@@ -71,83 +83,112 @@ interface FeedDataSource {
 
 class RemoteFeedRepository(private val client: SupabaseClient) : FeedDataSource {
     override suspend fun loadCategories(): List<RecipeCategory> =
-        client.postgrest["feed_categories"].select().decodeList<JsonObject>()
+        client.postgrest["categories"].select().decodeList<JsonObject>()
             .mapNotNull { row ->
                 val id = row.field("id")?.toIntOrNull() ?: return@mapNotNull null
                 RecipeCategory(id, row.field("name").orEmpty())
             }.sortedBy { it.id }
 
     override suspend fun loadPosts(): List<FeedPost> {
-        val posts = client.postgrest["feed_posts"].select().decodeList<JsonObject>()
-        val reactions = client.postgrest["feed_reactions"].select().decodeList<JsonObject>()
+        val posts = client.postgrest["posts"].select().decodeList<JsonObject>()
+        val reactions = client.postgrest["reactions"].select().decodeList<JsonObject>()
             .groupBy { it.field("post_id") }
         return posts.map { row ->
-            val id = row.field("id").orEmpty()
-            FeedPost(
-                id = id,
-                authorId = row.field("author_id").orEmpty(),
-                authorLogin = row.field("author_login").orEmpty(),
-                title = row.field("title").orEmpty(),
-                description = row.field("description").orEmpty(),
-                recipe = row.field("recipe").orEmpty(),
-                imagePath = row.field("image_path").orEmpty(),
-                createdAt = row.field("created_at").orEmpty(),
-                categoryId = row.field("category_id")?.toIntOrNull(),
-                commentCount = row.field("comment_count")?.toIntOrNull() ?: 0,
-                reactions = reactions[id].orEmpty().map {
-                    FeedReaction(it.field("user_id").orEmpty(), it.field("emoji").orEmpty())
-                },
-            )
+            row.toFeedPost(reactions[row.field("id")].orEmpty().map {
+                FeedReaction(it.field("user_id").orEmpty(), it.field("emoji").orEmpty())
+            })
         }.sortedByDescending { it.createdAt }.take(100)
+    }
+
+    override suspend fun loadOwnPosts(authorId: String): List<FeedPost> =
+        client.postgrest["posts"].select {
+            filter { eq("author_id", authorId) }
+        }.decodeList<JsonObject>()
+            .map { it.toFeedPost() }
+            .sortedByDescending { it.createdAt }
+
+    override suspend fun loadCategoryPosts(categoryId: Int): List<FeedPost> =
+        client.postgrest["posts"].select {
+            filter { eq("category_id", categoryId) }
+        }.decodeList<JsonObject>()
+            .map { it.toFeedPost() }
+
+    override suspend fun searchPosts(query: String): List<FeedPost> {
+        val literal = query.trim().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        val pattern = "%$literal%"
+        return client.postgrest["posts"].select {
+            filter {
+                or {
+                    ilike("title", pattern)
+                    ilike("description", pattern)
+                    ilike("recipe", pattern)
+                    ilike("author_login", pattern)
+                }
+            }
+        }.decodeList<JsonObject>()
+            .map { it.toFeedPost() }
+            .sortedByDescending { it.createdAt }
+            .take(30)
     }
 
     override suspend fun publish(
         context: Context,
         authorId: String,
         authorLogin: String,
-        image: Uri,
+        image: FeedImageInput,
         title: String,
         description: String,
         recipe: String,
         categoryId: Int,
     ) {
-        val file = FeedImageStorage.prepare(context, image)
-        try {
-            val path = "$authorId/${UUID.randomUUID()}.jpg"
-            val bytes = withContext(Dispatchers.IO) { file.readBytes() }
-            client.storage["feed-images"].upload(path, bytes) {
-                contentType = ContentType.Image.JPEG
+        val path = when (image) {
+            is FeedImageInput.Link -> {
+                val url = image.url.trim()
+                require(FeedImageStorage.isValidExternalUrl(url)) { "Введите корректную HTTPS-ссылку на изображение" }
+                require(FeedImageStorage.remoteImageFile(context, url) != null) { "Не удалось открыть изображение по ссылке" }
+                url
             }
-            client.postgrest["feed_posts"].insert(buildJsonObject {
-                put("author_id", authorId)
-                put("author_login", authorLogin)
-                put("title", title)
-                put("description", description)
-                put("recipe", recipe)
-                put("category_id", categoryId)
-                put("image_path", path)
-            })
-        } finally {
-            file.delete()
+            is FeedImageInput.Photo -> {
+                val file = FeedImageStorage.prepare(context, image.uri)
+                try {
+                    val storagePath = "$authorId/${UUID.randomUUID()}.jpg"
+                    val bytes = withContext(Dispatchers.IO) { file.readBytes() }
+                    client.storage["feed-images"].upload(storagePath, bytes) {
+                        contentType = ContentType.Image.JPEG
+                    }
+                    storagePath
+                } finally {
+                    file.delete()
+                }
+            }
         }
+        client.postgrest["posts"].insert(buildJsonObject {
+            put("author_id", authorId)
+            put("author_login", authorLogin)
+            put("title", title)
+            put("description", description)
+            put("recipe", recipe)
+            put("category_id", categoryId)
+            put("image_path", path)
+        })
     }
 
     override suspend fun toggleReaction(postId: String, userId: String, emoji: String) {
-        val existing = client.postgrest["feed_reactions"].select {
+        val existing = client.postgrest["reactions"].select {
             filter {
                 eq("post_id", postId)
                 eq("user_id", userId)
             }
         }.decodeList<JsonObject>().firstOrNull()?.field("emoji")
         if (existing == emoji) {
-            client.postgrest["feed_reactions"].delete {
+            client.postgrest["reactions"].delete {
                 filter {
                     eq("post_id", postId)
                     eq("user_id", userId)
                 }
             }
         } else {
-            client.postgrest["feed_reactions"].upsert(buildJsonObject {
+            client.postgrest["reactions"].upsert(buildJsonObject {
                 put("post_id", postId)
                 put("user_id", userId)
                 put("emoji", emoji)
@@ -156,7 +197,7 @@ class RemoteFeedRepository(private val client: SupabaseClient) : FeedDataSource 
     }
 
     override suspend fun loadComments(postId: String): List<FeedComment> =
-        client.postgrest["feed_comments"].select {
+        client.postgrest["comments"].select {
             filter { eq("post_id", postId) }
         }.decodeList<JsonObject>().map { row ->
             FeedComment(
@@ -168,7 +209,7 @@ class RemoteFeedRepository(private val client: SupabaseClient) : FeedDataSource 
         }.sortedBy { it.createdAt }
 
     override suspend fun addComment(postId: String, authorId: String, authorLogin: String, body: String) {
-        client.postgrest["feed_comments"].insert(buildJsonObject {
+        client.postgrest["comments"].insert(buildJsonObject {
             put("post_id", postId)
             put("author_id", authorId)
             put("author_login", authorLogin)
@@ -176,29 +217,12 @@ class RemoteFeedRepository(private val client: SupabaseClient) : FeedDataSource 
         })
     }
 
-    override suspend fun imageFile(context: Context, imagePath: String): File? = withContext(Dispatchers.IO) {
-        val directory = File(context.cacheDir, "feed_images").apply { mkdirs() }
-        val name = MessageDigest.getInstance("SHA-256")
-            .digest(imagePath.toByteArray()).joinToString("") { "%02x".format(it) }
-        val target = File(directory, "$name.jpg")
-        if (target.exists() && target.length() > 0) return@withContext target
-        val url = client.storage["feed-images"].publicUrl(imagePath)
-        val connection = URL(url).openConnection() as HttpURLConnection
-        connection.connectTimeout = 10_000
-        connection.readTimeout = 15_000
-        try {
-            if (connection.responseCode !in 200..299) return@withContext null
-            val temporary = File(directory, "$name.tmp")
-            connection.inputStream.use { input -> temporary.outputStream().use { input.copyTo(it) } }
-            if (!temporary.renameTo(target)) {
-                temporary.copyTo(target, overwrite = true)
-                temporary.delete()
-            }
-            target.takeIf { it.exists() && it.length() > 0 }
-        } finally {
-            connection.disconnect()
-        }
-    }
+    override suspend fun imageFile(context: Context, imagePath: String): File? =
+        FeedImageStorage.remoteImageFile(
+            context,
+            if (imagePath.startsWith("https://", ignoreCase = true)) imagePath
+            else client.storage["feed-images"].publicUrl(imagePath),
+        )
 }
 
 class LocalFeedRepository(context: Context, profileKey: String) : FeedDataSource {
@@ -230,22 +254,47 @@ class LocalFeedRepository(context: Context, profileKey: String) : FeedDataSource
         }.sortedByDescending { it.createdAt }
     }
 
+    override suspend fun loadOwnPosts(authorId: String): List<FeedPost> =
+        loadPosts().filter { it.authorId == authorId }
+
+    override suspend fun loadCategoryPosts(categoryId: Int): List<FeedPost> =
+        loadPosts().filter { it.categoryId == categoryId }
+
+    override suspend fun searchPosts(query: String): List<FeedPost> {
+        val term = query.trim()
+        return loadPosts().filter { post ->
+            listOf(post.title, post.description, post.recipe, post.authorLogin)
+                .any { it.contains(term, ignoreCase = true) }
+        }.take(30)
+    }
+
     override suspend fun publish(
         context: Context,
         authorId: String,
         authorLogin: String,
-        image: Uri,
+        image: FeedImageInput,
         title: String,
         description: String,
         recipe: String,
         categoryId: Int,
     ) {
-        val prepared = FeedImageStorage.prepare(context, image)
-        val destination = File(imageDirectory, "${UUID.randomUUID()}.jpg")
-        try {
-            withContext(Dispatchers.IO) { prepared.copyTo(destination) }
-        } finally {
-            prepared.delete()
+        val imagePath = when (image) {
+            is FeedImageInput.Link -> {
+                val url = image.url.trim()
+                require(FeedImageStorage.isValidExternalUrl(url)) { "Введите корректную HTTPS-ссылку на изображение" }
+                require(FeedImageStorage.remoteImageFile(context, url) != null) { "Не удалось открыть изображение по ссылке" }
+                url
+            }
+            is FeedImageInput.Photo -> {
+                val prepared = FeedImageStorage.prepare(context, image.uri)
+                val destination = File(imageDirectory, "${UUID.randomUUID()}.jpg")
+                try {
+                    withContext(Dispatchers.IO) { prepared.copyTo(destination) }
+                } finally {
+                    prepared.delete()
+                }
+                destination.absolutePath
+            }
         }
         val posts = readArray("posts")
         posts.put(JSONObject()
@@ -256,7 +305,7 @@ class LocalFeedRepository(context: Context, profileKey: String) : FeedDataSource
             .put("description", description)
             .put("recipe", recipe)
             .put("category_id", categoryId)
-            .put("image_path", destination.absolutePath)
+            .put("image_path", imagePath)
             .put("created_at", Instant.now().toString()))
         writeArray("posts", posts)
     }
@@ -295,7 +344,15 @@ class LocalFeedRepository(context: Context, profileKey: String) : FeedDataSource
     }
 
     override suspend fun imageFile(context: Context, imagePath: String): File? =
-        File(imagePath).takeIf { it.exists() }
+        if (imagePath.startsWith("https://", ignoreCase = true)) FeedImageStorage.remoteImageFile(context, imagePath)
+        else File(imagePath).takeIf { it.exists() }
+
+    internal fun previewReactions(): Map<String, List<FeedReaction>> =
+        readArray("reactions").objects().groupBy { it.optString("post_id") }
+            .mapValues { (_, rows) -> rows.map { FeedReaction(it.optString("user_id"), it.optString("emoji")) } }
+
+    internal fun previewCommentCounts(): Map<String, Int> =
+        readArray("comments").objects().groupingBy { it.optString("post_id") }.eachCount()
 
     private fun readArray(key: String): JSONArray =
         runCatching { JSONArray(preferences.getString(key, "[]")) }.getOrDefault(JSONArray())
@@ -305,12 +362,178 @@ class LocalFeedRepository(context: Context, profileKey: String) : FeedDataSource
     }
 }
 
+/** Guests can read public recipes while their test posts and interactions stay on this device. */
+class PreviewFeedRepository(
+    private val remote: FeedDataSource,
+    private val local: LocalFeedRepository,
+) : FeedDataSource {
+    override suspend fun loadPosts(): List<FeedPost> {
+        val localPosts = local.loadPosts()
+        val sharedPosts = try {
+            remote.loadPosts()
+        } catch (error: Exception) {
+            if (localPosts.isEmpty()) throw error
+            emptyList()
+        }
+        val reactions = local.previewReactions()
+        val commentCounts = local.previewCommentCounts()
+        return (sharedPosts.map { post ->
+            post.copy(
+                reactions = post.reactions + reactions[post.id].orEmpty(),
+                commentCount = post.commentCount + (commentCounts[post.id] ?: 0),
+            )
+        } + localPosts).distinctBy { it.id }.sortedByDescending { it.createdAt }
+    }
+
+    override suspend fun loadOwnPosts(authorId: String): List<FeedPost> = local.loadOwnPosts(authorId)
+
+    override suspend fun loadCategories(): List<RecipeCategory> =
+        runCatching { remote.loadCategories() }.getOrElse { local.loadCategories() }
+
+    override suspend fun loadCategoryPosts(categoryId: Int): List<FeedPost> =
+        loadPosts().filter { it.categoryId == categoryId }
+
+    override suspend fun searchPosts(query: String): List<FeedPost> {
+        val term = query.trim()
+        return loadPosts().filter { post ->
+            listOf(post.title, post.description, post.recipe, post.authorLogin)
+                .any { it.contains(term, ignoreCase = true) }
+        }.take(30)
+    }
+
+    override suspend fun publish(
+        context: Context, authorId: String, authorLogin: String, image: FeedImageInput,
+        title: String, description: String, recipe: String, categoryId: Int,
+    ) = local.publish(context, authorId, authorLogin, image, title, description, recipe, categoryId)
+
+    override suspend fun toggleReaction(postId: String, userId: String, emoji: String) =
+        local.toggleReaction(postId, userId, emoji)
+
+    override suspend fun loadComments(postId: String): List<FeedComment> {
+        val ownComments = local.loadComments(postId)
+        val sharedComments = try {
+            remote.loadComments(postId)
+        } catch (error: Exception) {
+            if (ownComments.isEmpty()) throw error
+            emptyList()
+        }
+        return (sharedComments + ownComments).sortedBy { it.createdAt }
+    }
+
+    override suspend fun addComment(postId: String, authorId: String, authorLogin: String, body: String) =
+        local.addComment(postId, authorId, authorLogin, body)
+
+    override suspend fun imageFile(context: Context, imagePath: String): File? =
+        local.imageFile(context, imagePath) ?: remote.imageFile(context, imagePath)
+}
+
 private fun JsonObject.field(key: String): String? = this[key]?.jsonPrimitive?.contentOrNull
+
+private fun JsonObject.toFeedPost(reactions: List<FeedReaction> = emptyList()): FeedPost = FeedPost(
+    id = field("id").orEmpty(),
+    authorId = field("author_id").orEmpty(),
+    authorLogin = field("author_login").orEmpty(),
+    title = field("title").orEmpty(),
+    description = field("description").orEmpty(),
+    recipe = field("recipe").orEmpty(),
+    imagePath = field("image_path").orEmpty(),
+    createdAt = field("created_at").orEmpty(),
+    categoryId = field("category_id")?.toIntOrNull(),
+    commentCount = field("comment_count")?.toIntOrNull() ?: 0,
+    reactions = reactions,
+)
 
 private fun JSONArray.objects(): List<JSONObject> =
     (0 until length()).mapNotNull { optJSONObject(it) }
 
 object FeedImageStorage {
+    private const val maxRemoteBytes = 8_388_608L
+
+    fun isValidExternalUrl(value: String): Boolean {
+        if (value.length !in 12..2048 || value.any(Char::isWhitespace)) return false
+        val uri = runCatching { URI(value) }.getOrNull() ?: return false
+        return uri.scheme.equals("https", ignoreCase = true) &&
+            !uri.host.isNullOrBlank() && uri.userInfo == null
+    }
+
+    suspend fun remoteImageFile(context: Context, url: String): File? = withContext(Dispatchers.IO) {
+        if (!isValidExternalUrl(url)) return@withContext null
+        val directory = File(context.cacheDir, "feed_images").apply { mkdirs() }
+        val name = MessageDigest.getInstance("SHA-256")
+            .digest(url.toByteArray()).joinToString("") { "%02x".format(it) }
+        val target = File(directory, "$name.img")
+        if (target.exists() && target.length() > 0) return@withContext target
+
+        var currentUrl = url
+        for (redirect in 0..3) {
+            if (!isValidExternalUrl(currentUrl)) return@withContext null
+            val host = URI(currentUrl).host ?: return@withContext null
+            if (!isPublicHost(host)) return@withContext null
+            val connection = try {
+                URL(currentUrl).openConnection() as HttpURLConnection
+            } catch (_: Exception) {
+                return@withContext null
+            }
+            connection.connectTimeout = 10_000
+            connection.readTimeout = 15_000
+            connection.instanceFollowRedirects = false
+            val temporary = File(directory, "$name-${UUID.randomUUID()}.tmp")
+            try {
+                val status = connection.responseCode
+                if (status in 300..399) {
+                    val location = connection.getHeaderField("Location") ?: return@withContext null
+                    currentUrl = URL(connection.url, location).toString()
+                    continue
+                }
+                if (status !in 200..299 || connection.contentLengthLong > maxRemoteBytes) return@withContext null
+                var total = 0L
+                connection.inputStream.use { input ->
+                    temporary.outputStream().use { output ->
+                        val buffer = ByteArray(8192)
+                        while (true) {
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            total += count
+                            if (total > maxRemoteBytes) return@withContext null
+                            output.write(buffer, 0, count)
+                        }
+                    }
+                }
+                val decoded = decodeSampled(temporary) ?: return@withContext null
+                decoded.recycle()
+                if (!temporary.renameTo(target)) temporary.copyTo(target, overwrite = true)
+                return@withContext target
+            } catch (_: Exception) {
+                return@withContext null
+            } finally {
+                temporary.delete()
+                connection.disconnect()
+            }
+        }
+        null
+    }
+
+    fun decodeSampled(file: File): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        var sampleSize = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / sampleSize > 1600) sampleSize *= 2
+        return BitmapFactory.decodeFile(file.absolutePath, BitmapFactory.Options().apply { inSampleSize = sampleSize })
+    }
+
+    private fun isPublicHost(host: String): Boolean {
+        val normalized = host.lowercase()
+        if (normalized == "localhost" || normalized.endsWith(".localhost") || normalized.endsWith(".local")) return false
+        return runCatching {
+            InetAddress.getAllByName(host).all { address ->
+                !address.isAnyLocalAddress && !address.isLoopbackAddress &&
+                    !address.isLinkLocalAddress && !address.isSiteLocalAddress && !address.isMulticastAddress &&
+                    !(address is Inet6Address && (address.address[0].toInt() and 0xfe) == 0xfc)
+            }
+        }.getOrDefault(false)
+    }
+
     suspend fun prepare(context: Context, uri: Uri): File = withContext(Dispatchers.IO) {
         val decoded = decode(context, uri)
         val width = decoded.width

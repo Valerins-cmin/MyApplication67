@@ -14,6 +14,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -21,6 +22,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.isSystemInDarkTheme
 import com.example.myapplication67.ui.theme.MyApplication67Theme
+import com.example.myapplication67.ui.theme.ThemeAccent
+import com.example.myapplication67.ui.theme.ThemeMode
+import androidx.core.view.WindowCompat
 import io.github.jan.supabase.SupabaseClient
 import io.github.jan.supabase.auth.Auth
 import io.github.jan.supabase.auth.auth
@@ -51,17 +55,37 @@ class MainActivity : ComponentActivity() {
                 context.getSharedPreferences("appearance", Context.MODE_PRIVATE)
             }
             val systemDarkTheme = isSystemInDarkTheme()
-            var darkTheme by remember {
-                mutableStateOf(preferences.getBoolean("dark_theme", systemDarkTheme))
+            var themeMode by remember(preferences) {
+                mutableStateOf(
+                    if (preferences.contains("theme_mode")) ThemeMode.fromKey(preferences.getString("theme_mode", null))
+                    else if (preferences.contains("dark_theme")) {
+                        if (preferences.getBoolean("dark_theme", false)) ThemeMode.DARK else ThemeMode.LIGHT
+                    } else ThemeMode.SYSTEM,
+                )
+            }
+            var themeAccent by remember(preferences) {
+                mutableStateOf(ThemeAccent.fromKey(preferences.getString("theme_accent", null)))
+            }
+            val darkTheme = themeMode.isDark(systemDarkTheme)
+            SideEffect {
+                WindowCompat.getInsetsController(window, window.decorView).apply {
+                    isAppearanceLightStatusBars = !darkTheme
+                    isAppearanceLightNavigationBars = !darkTheme
+                }
             }
 
-            MyApplication67Theme(darkTheme = darkTheme) {
+            MyApplication67Theme(mode = themeMode, accent = themeAccent) {
                 AppRoot(
                     client = supabase,
-                    darkTheme = darkTheme,
-                    onDarkThemeChange = { enabled ->
-                        darkTheme = enabled
-                        preferences.edit().putBoolean("dark_theme", enabled).apply()
+                    themeMode = themeMode,
+                    onThemeModeChange = { mode ->
+                        themeMode = mode
+                        preferences.edit().putString("theme_mode", mode.key).remove("dark_theme").apply()
+                    },
+                    themeAccent = themeAccent,
+                    onThemeAccentChange = { accent ->
+                        themeAccent = accent
+                        preferences.edit().putString("theme_accent", accent.key).apply()
                     },
                 )
             }
@@ -72,9 +96,12 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun AppRoot(
     client: SupabaseClient,
-    darkTheme: Boolean,
-    onDarkThemeChange: (Boolean) -> Unit,
+    themeMode: ThemeMode,
+    onThemeModeChange: (ThemeMode) -> Unit,
+    themeAccent: ThemeAccent,
+    onThemeAccentChange: (ThemeAccent) -> Unit,
 ) {
+    val context = LocalContext.current
     val status by client.auth.sessionStatus.collectAsState()
     var showRegistration by rememberSaveable { mutableStateOf(false) }
     var previewMode by rememberSaveable { mutableStateOf<String?>(null) }
@@ -93,8 +120,10 @@ private fun AppRoot(
             profileKey = user?.id ?: tokenSubject(session.accessToken) ?: "account",
             profileRepository = profileRepository,
             feedRepository = feedRepository,
-            darkTheme = darkTheme,
-            onDarkThemeChange = onDarkThemeChange,
+            themeMode = themeMode,
+            onThemeModeChange = onThemeModeChange,
+            themeAccent = themeAccent,
+            onThemeAccentChange = onThemeAccentChange,
             onSignOut = {
                 client.auth.signOut()
                 previewMode = null
@@ -107,14 +136,21 @@ private fun AppRoot(
     }
 
     if ((previewMode == "guest" && BuildConfig.DEBUG) || previewMode == "pending_email") {
+        val previewKey = if (previewMode == "pending_email") pendingEmail ?: "pending" else "guest"
+        val previewFeedRepository = remember(feedRepository, context, previewKey) {
+            PreviewFeedRepository(feedRepository, LocalFeedRepository(context, previewKey))
+        }
         NawHostScreen(
             previewTitle = if (previewMode == "guest") "Гостевой режим" else "Подтвердите почту",
             accountEmail = if (previewMode == "pending_email") pendingEmail else null,
             loginHint = if (previewMode == "pending_email") pendingLogin else "guest",
-            profileKey = if (previewMode == "pending_email") pendingEmail ?: "pending" else "guest",
+            profileKey = previewKey,
             profileRepository = null,
-            darkTheme = darkTheme,
-            onDarkThemeChange = onDarkThemeChange,
+            feedRepository = previewFeedRepository,
+            themeMode = themeMode,
+            onThemeModeChange = onThemeModeChange,
+            themeAccent = themeAccent,
+            onThemeAccentChange = onThemeAccentChange,
             onExitPreview = {
                 previewMode = null
                 pendingEmail = null

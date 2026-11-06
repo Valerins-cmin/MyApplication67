@@ -15,7 +15,7 @@ import org.json.JSONObject
 
 class AuthRepository(private val client: SupabaseClient) {
     suspend fun register(login: String, email: String, password: String) {
-        val normalizedLogin = login.trim().lowercase(Locale.ROOT)
+        val normalizedLogin = LoginRules.normalize(login)
         client.auth.signUpWith(Email) {
             this.email = email.trim().lowercase(Locale.ROOT)
             this.password = password
@@ -24,19 +24,11 @@ class AuthRepository(private val client: SupabaseClient) {
     }
 
     suspend fun signIn(identifier: String, password: String) {
-        val normalizedIdentifier = identifier.trim().lowercase(Locale.ROOT)
-        if ('@' in normalizedIdentifier) {
-            client.auth.signInWith(Email) {
-                email = normalizedIdentifier
-                this.password = password
-            }
-        } else {
-            val session = requestUsernameSession(normalizedIdentifier, password)
-            client.auth.importSession(session)
-        }
+        val session = requestIdentifierSession(LoginRules.normalize(identifier), password)
+        client.auth.importSession(session)
     }
 
-    private suspend fun requestUsernameSession(login: String, password: String): UserSession =
+    private suspend fun requestIdentifierSession(identifier: String, password: String): UserSession =
         withContext(Dispatchers.IO) {
             val url = URL("${BuildConfig.SUPABASE_URL}/functions/v1/login-by-username")
             val connection = (url.openConnection() as HttpURLConnection).apply {
@@ -50,7 +42,7 @@ class AuthRepository(private val client: SupabaseClient) {
 
             try {
                 val requestBody = JSONObject()
-                    .put("login", login)
+                    .put("login", identifier)
                     .put("password", password)
                     .toString()
                 connection.outputStream.use { output ->
@@ -77,4 +69,11 @@ class AuthRepository(private val client: SupabaseClient) {
                 connection.disconnect()
             }
         }
+}
+
+internal object LoginRules {
+    fun normalize(value: String): String = value.trim().lowercase(Locale.ROOT)
+
+    fun isValid(value: String): Boolean =
+        value.codePointCount(0, value.length) in 3..30
 }

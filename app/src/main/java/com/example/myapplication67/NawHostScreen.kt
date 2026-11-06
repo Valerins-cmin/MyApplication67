@@ -28,6 +28,9 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.ui.graphics.Color
+import com.example.myapplication67.ui.theme.ThemeAccent
+import com.example.myapplication67.ui.theme.ThemeMode
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -63,8 +66,10 @@ fun NawHostScreen(
     profileKey: String,
     profileRepository: ProfileDataSource?,
     feedRepository: FeedDataSource? = null,
-    darkTheme: Boolean,
-    onDarkThemeChange: (Boolean) -> Unit,
+    themeMode: ThemeMode,
+    onThemeModeChange: (ThemeMode) -> Unit,
+    themeAccent: ThemeAccent,
+    onThemeAccentChange: (ThemeAccent) -> Unit,
     onExitPreview: (() -> Unit)? = null,
     onSignOut: (suspend () -> Unit)? = null,
 ) {
@@ -119,7 +124,10 @@ fun NawHostScreen(
     BackHandler(showAccount) { accountBack() }
 
     Scaffold(
+        containerColor = Color.Transparent,
+        contentColor = MaterialTheme.colorScheme.onBackground,
         topBar = {
+            if (showAccount || selectedTab != 1) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -130,7 +138,8 @@ fun NawHostScreen(
             ) {
                 if (showAccount) {
                     IconButton(onClick = accountBack) {
-                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "Назад")
+                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "Назад",
+                            tint = MaterialTheme.colorScheme.onBackground)
                     }
                     Text(
                         when (accountPage) {
@@ -141,11 +150,13 @@ fun NawHostScreen(
                             else -> "Профиль"
                         },
                         style = MaterialTheme.typography.titleLarge,
+                        color = MaterialTheme.colorScheme.onBackground,
                     )
                 } else {
                     Text(
                         if (selectedTab == 1) previewTitle ?: mainTabs[selectedTab].title else mainTabs[selectedTab].title,
                         style = MaterialTheme.typography.titleLarge,
+                        color = MaterialTheme.colorScheme.onBackground,
                     )
                     Spacer(Modifier.weight(1f))
                     Box(
@@ -162,6 +173,7 @@ fun NawHostScreen(
                         AvatarBadge(avatarFile = avatarFile, avatarVersion = avatarVersion, size = 42.dp)
                     }
                 }
+            }
             }
         },
         bottomBar = {
@@ -184,6 +196,7 @@ fun NawHostScreen(
             AccountScreen(
                 modifier = screenModifier,
                 dataSource = dataSource,
+                feedDataSource = feedSource,
                 profileKey = profileKey,
                 page = accountPage,
                 onPageChange = { accountPage = it },
@@ -191,8 +204,10 @@ fun NawHostScreen(
                 avatarFile = avatarFile,
                 avatarVersion = avatarVersion,
                 onPickPhoto = { photoPicker.launch("image/*") },
-                darkTheme = darkTheme,
-                onDarkThemeChange = onDarkThemeChange,
+                themeMode = themeMode,
+                onThemeModeChange = onThemeModeChange,
+                themeAccent = themeAccent,
+                onThemeAccentChange = onThemeAccentChange,
                 onExitPreview = onExitPreview,
                 onSignOut = onSignOut,
             )
@@ -209,10 +224,22 @@ fun NawHostScreen(
                 1 -> HomeScreen(
                     modifier = screenModifier,
                     login = homeLogin ?: accountEmail?.substringBefore('@') ?: "Пользователь",
+                    profileKey = profileKey,
+                    avatarFile = avatarFile,
+                    avatarVersion = avatarVersion,
+                    onProfileClick = {
+                        accountPage = "profile"
+                        showAccount = true
+                    },
                     searchQuery = searchQuery,
                     onSearchQueryChange = { searchQuery = it },
+                    dataSource = feedSource,
                 )
-                2 -> Box(screenModifier)
+                2 -> CalculatorScreen(
+                    modifier = screenModifier,
+                    dataSource = feedSource,
+                    profileKey = profileKey,
+                )
             }
         }
     }

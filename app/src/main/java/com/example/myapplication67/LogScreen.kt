@@ -61,7 +61,7 @@ fun LogScreen(
             onValueChange = { identifier = it; errorMessage = null },
             label = { Text("Почта или логин") },
             singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(Modifier.height(12.dp))

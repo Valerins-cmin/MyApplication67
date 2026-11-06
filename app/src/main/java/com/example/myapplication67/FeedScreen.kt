@@ -1,7 +1,7 @@
 package com.example.myapplication67
 
+import android.content.Context
 import android.content.Intent
-import android.graphics.BitmapFactory
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -76,8 +76,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -98,10 +100,15 @@ fun FeedScreen(
     dataSource: FeedDataSource,
     currentUserId: String,
     currentLogin: String,
-    followedLogins: List<String> = emptyList(),
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val followPreferences = remember(context, currentUserId) {
+        context.getSharedPreferences("feed_follows_$currentUserId", Context.MODE_PRIVATE)
+    }
+    var followedLogins by remember(followPreferences) {
+        mutableStateOf(followPreferences.getStringSet("logins", emptySet()).orEmpty().toSet())
+    }
     var page by rememberSaveable { mutableStateOf("feed") }
     var activePostId by rememberSaveable { mutableStateOf<String?>(null) }
     var posts by remember(dataSource) { mutableStateOf<List<FeedPost>>(emptyList()) }
@@ -115,6 +122,7 @@ fun FeedScreen(
     var categoriesRefresh by remember { mutableIntStateOf(0) }
 
     var pickedImage by rememberSaveable { mutableStateOf<String?>(null) }
+    var imageUrl by rememberSaveable { mutableStateOf("") }
     var selectedRecipeCategoryId by rememberSaveable { mutableStateOf<Int?>(null) }
     var title by rememberSaveable { mutableStateOf("") }
     var description by rememberSaveable { mutableStateOf("") }
@@ -128,17 +136,29 @@ fun FeedScreen(
     var commentError by remember { mutableStateOf<String?>(null) }
     var sendingComment by remember { mutableStateOf(false) }
     var commentsRefresh by remember { mutableIntStateOf(0) }
+    val availableAuthors = posts.map { it.authorLogin }.filter { it.isNotBlank() && it != currentLogin }
+        .distinct().sorted()
+    val toggleFollow: (String) -> Unit = { login ->
+        followedLogins = if (login in followedLogins) followedLogins - login else followedLogins + login
+        followPreferences.edit().putStringSet("logins", followedLogins).apply()
+    }
 
     val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) pickedImage = uri.toString()
+        if (uri != null) {
+            pickedImage = uri.toString()
+            imageUrl = ""
+        }
     }
 
     LaunchedEffect(dataSource, refreshKey) {
-        loading = true
-        runCatching { dataSource.loadPosts() }
-            .onSuccess { posts = it; loadError = false }
-            .onFailure { loadError = true }
-        loading = false
+        loading = posts.isEmpty()
+        while (true) {
+            runCatching { dataSource.loadPosts() }
+                .onSuccess { posts = it; loadError = false }
+                .onFailure { loadError = posts.isEmpty() }
+            loading = false
+            delay(60_000)
+        }
     }
     LaunchedEffect(dataSource, categoriesRefresh) {
         categoriesLoading = true
@@ -163,7 +183,14 @@ fun FeedScreen(
     Box(modifier) {
         when (page) {
             "editor" -> FeedEditor(
+                dataSource = dataSource,
                 pickedImage = pickedImage,
+                imageUrl = imageUrl,
+                onImageUrlChange = { value ->
+                    imageUrl = value
+                    if (value.isNotBlank()) pickedImage = null
+                    saveError = null
+                },
                 categories = recipeCategories,
                 selectedCategoryId = selectedRecipeCategoryId,
                 onCategorySelected = { selectedRecipeCategoryId = it; saveError = null },
@@ -181,11 +208,17 @@ fun FeedScreen(
                 onBack = { page = "feed" },
                 onPickImage = { photoPicker.launch("image/*") },
                 onSave = {
-                    val uri = pickedImage?.let(Uri::parse)
+                    val image = when {
+                        imageUrl.isNotBlank() -> FeedImageInput.Link(imageUrl.trim())
+                        pickedImage != null -> FeedImageInput.Photo(Uri.parse(pickedImage))
+                        else -> null
+                    }
                     val categoryId = selectedRecipeCategoryId
                     when {
                         currentLogin.isBlank() -> saveError = "Подождите загрузки профиля"
-                        uri == null -> saveError = "Выберите фотографию рецепта"
+                        image == null -> saveError = "Выберите фото или вставьте ссылку на изображение"
+                        image is FeedImageInput.Link && !FeedImageStorage.isValidExternalUrl(image.url) ->
+                            saveError = "Введите корректную HTTPS-ссылку на изображение"
                         categoryId == null -> saveError = "Выберите категорию"
                         title.isBlank() || description.isBlank() || recipe.isBlank() ->
                             saveError = "Заполните название, описание и рецепт"
@@ -194,8 +227,9 @@ fun FeedScreen(
                             saveError = null
                             scope.launch {
                                 try {
-                                    dataSource.publish(context, currentUserId, currentLogin, uri, title.trim(), description.trim(), recipe.trim(), categoryId)
+                                    dataSource.publish(context, currentUserId, currentLogin, image, title.trim(), description.trim(), recipe.trim(), categoryId)
                                     pickedImage = null
+                                    imageUrl = ""
                                     selectedRecipeCategoryId = null
                                     title = ""
                                     description = ""
@@ -204,7 +238,8 @@ fun FeedScreen(
                                     refreshKey++
                                 } catch (error: Exception) {
                                     saveError = when (error.message) {
-                                        "Изображение слишком большое", "Неверный формат изображения" -> error.message
+                                        "Изображение слишком большое", "Неверный формат изображения",
+                                        "Не удалось открыть изображение по ссылке", "Введите корректную HTTPS-ссылку на изображение" -> error.message
                                         else -> "Не удалось опубликовать рецепт. Попробуйте ещё раз."
                                     }
                                 } finally {
@@ -280,11 +315,25 @@ fun FeedScreen(
                         if (selectedCategory == FeedCategory.SUBSCRIPTIONS) {
                             item { FeedHeading("Ваши подписки", "Авторы, за которыми вы следите") }
                             item {
+                                Text("Авторы сообщества", style = MaterialTheme.typography.titleSmall)
+                                if (availableAuthors.isNotEmpty()) {
+                                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        items(availableAuthors) { login ->
+                                            FilterChip(
+                                                selected = login in followedLogins,
+                                                onClick = { toggleFollow(login) },
+                                                label = { Text("@$login") },
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            item {
                                 if (followedLogins.isEmpty()) {
-                                    FeedEmptyCard(Icons.Outlined.People, "Подписок пока нет", "Авторы появятся здесь после подписки.")
+                                    FeedEmptyCard(Icons.Outlined.People, "Подписок пока нет", "Выберите автора выше.")
                                 } else {
                                     LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                                        items(followedLogins) { login -> FollowedAuthor(login) }
+                                        items(followedLogins.sorted()) { login -> FollowedAuthor(login) }
                                     }
                                 }
                             }
@@ -445,22 +494,23 @@ private fun FeedPostCard(
 }
 
 @Composable
-private fun FeedPostImage(dataSource: FeedDataSource, imagePath: String) {
+internal fun FeedPostImage(dataSource: FeedDataSource, imagePath: String, height: Dp = 300.dp) {
     val context = LocalContext.current
     val bitmap by produceState<ImageBitmap?>(null, dataSource, imagePath) {
+        value = null
         value = withContext(Dispatchers.IO) {
             runCatching {
-                dataSource.imageFile(context, imagePath)?.let { BitmapFactory.decodeFile(it.absolutePath)?.asImageBitmap() }
+                dataSource.imageFile(context, imagePath)?.let { FeedImageStorage.decodeSampled(it)?.asImageBitmap() }
             }.getOrNull()
         }
     }
-    FeedImageFrame(bitmap)
+    FeedImageFrame(bitmap, height)
 }
 
 @Composable
-private fun FeedImageFrame(bitmap: ImageBitmap?) {
+private fun FeedImageFrame(bitmap: ImageBitmap?, height: Dp = 300.dp) {
     Box(
-        modifier = Modifier.fillMaxWidth().height(300.dp).background(MaterialTheme.colorScheme.surfaceVariant),
+        modifier = Modifier.fillMaxWidth().height(height).background(MaterialTheme.colorScheme.surfaceVariant),
         contentAlignment = Alignment.Center,
     ) {
         if (bitmap == null) {
@@ -484,7 +534,10 @@ private fun FeedImageFrame(bitmap: ImageBitmap?) {
 
 @Composable
 private fun FeedEditor(
+    dataSource: FeedDataSource,
     pickedImage: String?,
+    imageUrl: String,
+    onImageUrlChange: (String) -> Unit,
     categories: List<RecipeCategory>,
     selectedCategoryId: Int?,
     onCategorySelected: (Int) -> Unit,
@@ -510,6 +563,14 @@ private fun FeedEditor(
             runCatching { FeedImageStorage.preview(context, Uri.parse(path))?.asImageBitmap() }.getOrNull()
         }
     }
+    val previewUrl by produceState<String?>(null, imageUrl) {
+        value = null
+        val candidate = imageUrl.trim()
+        if (FeedImageStorage.isValidExternalUrl(candidate)) {
+            delay(500)
+            value = candidate
+        }
+    }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "Назад") }
@@ -517,10 +578,22 @@ private fun FeedEditor(
         }
         Spacer(Modifier.height(12.dp))
         if (pickedImage != null) FeedImageFrame(preview)
+        else previewUrl?.let { FeedPostImage(dataSource, it) }
         Spacer(Modifier.height(12.dp))
         OutlinedButton(onClick = onPickImage, modifier = Modifier.fillMaxWidth()) {
             Text(if (pickedImage == null) "Выбрать фото" else "Сменить фото")
         }
+        Spacer(Modifier.height(8.dp))
+        Text("или", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(
+            value = imageUrl,
+            onValueChange = onImageUrlChange,
+            label = { Text("URL картинки") },
+            supportingText = { Text("Публичная HTTPS-ссылка на JPG, PNG или WebP") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
         Spacer(Modifier.height(14.dp))
         Box {
             OutlinedButton(
@@ -627,7 +700,8 @@ private fun FeedComments(
 @Composable
 private fun FeedHeading(title: String, subtitle: String) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+        Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onBackground)
         Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
