@@ -1,7 +1,6 @@
 package com.example.myapplication67
 
 import android.content.Context
-import android.net.Uri
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -27,8 +26,8 @@ class FeedScreenTest {
         val source = object : FeedDataSource {
             override suspend fun loadPosts() = listOf(
                 FeedPost(
-                    id = "post-1",
-                    authorId = "author-1",
+                    id = "1",
+                    authorId = "10",
                     authorLogin = "cook",
                     title = "Пирог",
                     description = "Короткое описание",
@@ -37,7 +36,15 @@ class FeedScreenTest {
                     createdAt = "2026-11-05T00:00:00Z",
                 ),
             )
-            override suspend fun publish(context: Context, authorId: String, authorLogin: String, image: Uri, title: String, description: String, recipe: String) = Unit
+            override suspend fun loadOwnPosts(authorId: String) = loadPosts().filter { it.authorId == authorId }
+            override suspend fun loadCategories() = listOf(RecipeCategory(1, "Завтраки"))
+            override suspend fun loadCategoryPosts(categoryId: Int) = loadPosts()
+            override suspend fun searchPosts(query: String) = loadPosts()
+            override suspend fun publish(context: Context, authorId: String, authorLogin: String,
+                image: FeedImageInput, title: String, description: String, recipe: String, categoryId: Int) = Unit
+            override suspend fun updatePost(context: Context, post: FeedPost, authorLogin: String,
+                image: FeedImageInput?, title: String, description: String, recipe: String, categoryId: Int) = Unit
+            override suspend fun deletePost(post: FeedPost) = Unit
             override suspend fun toggleReaction(postId: String, userId: String, emoji: String) = Unit
             override suspend fun loadComments(postId: String) = emptyList<FeedComment>()
             override suspend fun addComment(postId: String, authorId: String, authorLogin: String, body: String) = Unit
@@ -50,7 +57,7 @@ class FeedScreenTest {
                     selectedCategory = category,
                     onCategorySelected = { category = it },
                     dataSource = source,
-                    currentUserId = "viewer",
+                    currentUserId = "10",
                     currentLogin = "viewer",
                 )
             }
@@ -61,7 +68,7 @@ class FeedScreenTest {
         }
         composeRule.onNodeWithText("Рецепт").performScrollTo().performClick()
         composeRule.onNodeWithText("Шаг 1: замесить тесто").assertExists()
-        composeRule.onNodeWithContentDescription("Комментарии").performScrollTo().performClick()
+        composeRule.onNodeWithContentDescription("Комментарии: 0").performScrollTo().performClick()
         composeRule.onNodeWithText("Чат публикации").assertExists()
     }
 }

@@ -64,8 +64,10 @@ fun NawHostScreen(
     accountEmail: String? = null,
     loginHint: String?,
     profileKey: String,
+    avatarAuthUserId: String? = null,
     profileRepository: ProfileDataSource?,
     feedRepository: FeedDataSource? = null,
+    remoteAvatarStorage: RemoteAvatarStorage? = null,
     themeMode: ThemeMode,
     onThemeModeChange: (ThemeMode) -> Unit,
     themeAccent: ThemeAccent,
@@ -86,16 +88,27 @@ fun NawHostScreen(
     val feedSource = remember(feedRepository, context, profileKey) {
         feedRepository ?: LocalFeedRepository(context, profileKey)
     }
-    val avatarFile = remember(context, profileKey) { AvatarStorage.fileFor(context, profileKey) }
-    var avatarVersion by remember(profileKey) { mutableIntStateOf(0) }
+    val avatarKey = avatarAuthUserId ?: profileKey
+    val avatarFile = remember(context, avatarKey) { AvatarStorage.fileFor(context, avatarKey) }
+    var avatarVersion by remember(avatarKey) { mutableIntStateOf(0) }
+    LaunchedEffect(remoteAvatarStorage, avatarKey) {
+        if (remoteAvatarStorage != null) {
+            runCatching { remoteAvatarStorage.sync(context, avatarKey) }
+                .onSuccess { if (it) avatarVersion++ }
+        }
+    }
     val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {
             scope.launch {
                 try {
-                    AvatarStorage.save(context, profileKey, uri)
+                    if (remoteAvatarStorage != null) remoteAvatarStorage.save(context, avatarKey, uri)
+                    else AvatarStorage.save(context, avatarKey, uri)
                     avatarVersion++
                 } catch (_: Exception) {
-                    Toast.makeText(context, "Не удалось сохранить фото", Toast.LENGTH_SHORT).show()
+                    avatarVersion++
+                    Toast.makeText(context,
+                        if (remoteAvatarStorage != null) "Фото не загрузилось в облако. Попробуйте ещё раз."
+                        else "Не удалось сохранить фото", Toast.LENGTH_SHORT).show()
                 }
             }
         }

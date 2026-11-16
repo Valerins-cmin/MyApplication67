@@ -6,6 +6,8 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.example.myapplication67.ui.theme.ThemeAccent
+import com.example.myapplication67.ui.theme.ThemeMode
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -22,8 +24,10 @@ class ProfileNavigationTest {
                 loginHint = "guest",
                 profileKey = "navigation_test_guest",
                 profileRepository = null,
-                darkTheme = false,
-                onDarkThemeChange = {},
+                themeMode = ThemeMode.SYSTEM,
+                onThemeModeChange = {},
+                themeAccent = ThemeAccent.DEFAULT,
+                onThemeAccentChange = {},
             )
         }
 

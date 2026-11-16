@@ -5,6 +5,7 @@ import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
@@ -22,6 +23,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Archive
@@ -30,6 +32,8 @@ import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Person
+import androidx.compose.material.icons.outlined.Phone
+import androidx.compose.material.icons.outlined.Cake
 import androidx.compose.material.icons.outlined.Restore
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Check
@@ -64,7 +68,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -81,21 +87,15 @@ import kotlinx.coroutines.launch
 import android.graphics.Bitmap
 import android.graphics.ImageDecoder
 import android.net.Uri
-import io.github.jan.supabase.SupabaseClient
-import io.github.jan.supabase.postgrest.postgrest
+import android.util.Base64
 import java.security.MessageDigest
 import java.time.Instant
-import java.util.UUID
 import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.booleanOrNull
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.put
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
 import com.example.myapplication67.ui.theme.ThemeAccent
@@ -216,7 +216,8 @@ fun AccountScreen(
                 snapshot = dataSource.load()
                 onSuccess()
             } catch (error: Exception) {
-                errorMessage = if (error.message?.contains("23505") == true) {
+                errorMessage = if (error.message?.contains("23505") == true ||
+                    error.message?.contains("логин уже занят", ignoreCase = true) == true) {
                     "Этот логин уже занят."
                 } else {
                     "Не удалось сохранить изменения. Попробуйте ещё раз."
@@ -245,15 +246,19 @@ fun AccountScreen(
             if (current != null) {
                 when (page) {
                     "edit" -> EditProfileContent(
+                        avatarFile = avatarFile,
+                        avatarVersion = avatarVersion,
+                        onPickPhoto = onPickPhoto,
                         login = loginDraft,
-                        onLoginChange = { loginDraft = it },
+                        onLoginChange = { loginDraft = it; errorMessage = null },
                         about = aboutDraft,
-                        onAboutChange = { aboutDraft = it.take(500) },
+                        onAboutChange = { aboutDraft = it.take(500); errorMessage = null },
                         phone = phoneDraft,
-                        onPhoneChange = { phoneDraft = it.take(40) },
+                        onPhoneChange = { phoneDraft = it.take(40); errorMessage = null },
                         birthday = birthdayDraft,
-                        onBirthdayChange = { birthdayDraft = it.take(10) },
+                        onBirthdayChange = { birthdayDraft = it.take(10); errorMessage = null },
                         busy = busy,
+                        errorMessage = errorMessage,
                         onSave = {
                             val birthday = birthdayDraft.trim().ifBlank { null }
                             val normalizedLogin = LoginRules.normalize(loginDraft)
@@ -363,7 +368,7 @@ fun AccountScreen(
                 }
             }
         }
-        errorMessage?.let { message ->
+        errorMessage?.takeIf { page != "edit" || snapshot == null }?.let { message ->
             Spacer(Modifier.height(16.dp))
             Text(message, color = MaterialTheme.colorScheme.error)
         }
@@ -452,12 +457,12 @@ private fun ProfileContent(
         if (showArchive) {
             when {
                 previewTitle != null -> "Архив хранится только на этом устройстве"
-                snapshot.archivePublic -> "Другим видны публикации с галочкой «Показывать»"
-                else -> "Архив виден только вам"
+                snapshot.archivePublic -> "Архив открыт; показ рецепта в ленте меняется через меню ⋮"
+                else -> "Архив виден вам; показ рецепта в ленте меняется через меню ⋮"
             }
         } else {
             if (previewTitle != null) "Рецепты хранятся только на этом устройстве"
-            else "Карточки из ленты видны всем, рецепты профиля — только вам"
+            else "Опубликованные рецепты профиля также видны в общей ленте"
         },
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -637,7 +642,7 @@ private fun RecipePostCard(
                         }
                         DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
                             DropdownMenuItem(
-                                text = { Text("Показывать") },
+                                text = { Text(if (post.showPublicly) "Опубликован" else "Опубликовать") },
                                 trailingIcon = {
                                     Checkbox(
                                         checked = post.showPublicly,
@@ -664,6 +669,12 @@ private fun RecipePostCard(
                 overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.titleSmall,
                 modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 10.dp),
+            )
+            Text(
+                if (post.showPublicly) "В общей ленте" else "Скрыт из ленты",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 12.dp),
             )
             Row(
                 modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp, bottom = 4.dp),
@@ -697,6 +708,9 @@ private fun RecipePostCard(
 
 @Composable
 private fun EditProfileContent(
+    avatarFile: File,
+    avatarVersion: Int,
+    onPickPhoto: () -> Unit,
     login: String,
     onLoginChange: (String) -> Unit,
     about: String,
@@ -706,48 +720,137 @@ private fun EditProfileContent(
     birthday: String,
     onBirthdayChange: (String) -> Unit,
     busy: Boolean,
+    errorMessage: String?,
     onSave: () -> Unit,
 ) {
-    Text("Информация о пользователе", style = MaterialTheme.typography.titleLarge)
-    Spacer(Modifier.height(18.dp))
-    OutlinedTextField(
-        value = login,
-        onValueChange = onLoginChange,
-        label = { Text("Логин") },
-        supportingText = { Text("От 3 до 30 символов; буквы и знаки любые") },
-        singleLine = true,
+    Card(
         modifier = Modifier.fillMaxWidth(),
-    )
-    Spacer(Modifier.height(12.dp))
-    OutlinedTextField(
-        value = phone,
-        onValueChange = onPhoneChange,
-        label = { Text("Телефон") },
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-        singleLine = true,
-        modifier = Modifier.fillMaxWidth(),
-    )
-    Spacer(Modifier.height(12.dp))
-    OutlinedTextField(
-        value = about,
-        onValueChange = onAboutChange,
-        label = { Text("О себе") },
-        minLines = 3,
-        maxLines = 6,
-        modifier = Modifier.fillMaxWidth(),
-    )
-    Spacer(Modifier.height(12.dp))
-    OutlinedTextField(
-        value = birthday,
-        onValueChange = onBirthdayChange,
-        label = { Text("День рождения") },
-        supportingText = { Text("Формат: ГГГГ-ММ-ДД") },
-        singleLine = true,
-        modifier = Modifier.fillMaxWidth(),
-    )
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+    ) {
+        Column(Modifier.fillMaxWidth().padding(22.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(Modifier.size(112.dp).clickable(onClick = onPickPhoto)) {
+                AvatarBadge(avatarFile = avatarFile, avatarVersion = avatarVersion, size = 104.dp,
+                    modifier = Modifier.align(Alignment.TopCenter))
+                Box(
+                    Modifier.align(Alignment.BottomEnd).size(36.dp).clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primary),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.Outlined.CameraAlt, contentDescription = "Сменить фото профиля",
+                        tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(21.dp))
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            Text("Фото профиля", style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onPrimaryContainer, fontWeight = FontWeight.SemiBold)
+            TextButton(onClick = onPickPhoto) { Text("Выбрать другое фото") }
+        }
+    }
+    Spacer(Modifier.height(24.dp))
+    Text("Информация о пользователе", style = MaterialTheme.typography.titleMedium,
+        color = MaterialTheme.colorScheme.onBackground, fontWeight = FontWeight.SemiBold)
+    Spacer(Modifier.height(10.dp))
+    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            ProfileEditRow(
+                value = login,
+                onValueChange = onLoginChange,
+                label = "Имя пользователя",
+                placeholder = "Имя пользователя",
+                hint = "От 3 до 30 символов",
+                icon = Icons.Outlined.Person,
+            )
+            ProfileEditRow(
+                value = about,
+                onValueChange = onAboutChange,
+                label = "О себе",
+                placeholder = "Расскажите о себе",
+                singleLine = false,
+                icon = Icons.Outlined.Edit,
+            )
+            ProfileEditRow(
+                value = phone,
+                onValueChange = onPhoneChange,
+                label = "Телефон",
+                placeholder = "Не указан",
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                icon = Icons.Outlined.Phone,
+            )
+            ProfileEditRow(
+                value = birthday,
+                onValueChange = onBirthdayChange,
+                label = "День рождения",
+                placeholder = "ГГГГ-ММ-ДД",
+                icon = Icons.Outlined.Cake,
+                hint = "Формат: 2020-12-31",
+            )
+        }
+    }
+    errorMessage?.let { message ->
+        Spacer(Modifier.height(14.dp))
+        Text(message, color = MaterialTheme.colorScheme.error,
+            style = MaterialTheme.typography.bodyMedium)
+    }
     Spacer(Modifier.height(22.dp))
-    Button(onClick = onSave, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+    Button(onClick = onSave, enabled = !busy,
+        modifier = Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(16.dp)) {
         Text(if (busy) "Сохранение…" else "Сохранить")
+    }
+    Spacer(Modifier.height(12.dp))
+}
+
+@Composable
+private fun ProfileEditRow(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    placeholder: String,
+    hint: String? = null,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    singleLine: Boolean = true,
+    keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
+) {
+    var focused by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth()) {
+        Text(label, style = MaterialTheme.typography.labelLarge,
+            color = if (focused) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+            fontWeight = FontWeight.Medium)
+        Spacer(Modifier.height(7.dp))
+        BasicTextField(
+            value = value,
+            onValueChange = onValueChange,
+            modifier = Modifier.fillMaxWidth()
+                .border(1.dp, if (focused) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+                    RoundedCornerShape(16.dp))
+                .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(16.dp))
+                .onFocusChanged { focused = it.isFocused }
+                .padding(horizontal = 14.dp, vertical = 14.dp),
+            textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+            singleLine = singleLine,
+            minLines = if (singleLine) 1 else 2,
+            maxLines = if (singleLine) 1 else 5,
+            keyboardOptions = keyboardOptions,
+            decorationBox = { field ->
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp))
+                    Box(Modifier.weight(1f)) {
+                        if (value.isEmpty()) {
+                            Text(placeholder, style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        field()
+                    }
+                }
+            },
+        )
+        if (hint != null) {
+            Text(hint, style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 4.dp, top = 5.dp))
+        }
     }
 }
 
@@ -938,6 +1041,9 @@ private fun NewPostContent(
     onSave: () -> Unit,
 ) {
     Text("Опубликовать рецепт", style = MaterialTheme.typography.titleLarge)
+    Text("После добавления рецепт появится в общей ленте без фото и категории.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant)
     Spacer(Modifier.height(18.dp))
     OutlinedTextField(
         value = title,
@@ -956,7 +1062,7 @@ private fun NewPostContent(
     )
     Spacer(Modifier.height(22.dp))
     Button(onClick = onSave, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-        Text(if (busy) "Сохранение…" else "Добавить рецепт")
+        Text(if (busy) "Сохранение…" else "Опубликовать рецепт")
     }
 }
 
@@ -994,96 +1100,60 @@ interface ProfileDataSource {
     suspend fun deletePost(ownerId: String, postId: String)
 }
 
-class RemoteProfileRepository(private val client: SupabaseClient) : ProfileDataSource {
+class RemoteProfileRepository(private val api: DemoApi) : ProfileDataSource {
     override suspend fun load(): ProfileSnapshot {
-        val row = client.postgrest["users"].select().decodeList<JsonObject>().singleOrNull()
-            ?: error("Профиль не найден. Попробуйте войти заново.")
-        val id = row.string("id") ?: error("У профиля отсутствует ID")
-        val visibility = client.postgrest["archive_settings"].select {
-            filter { eq("owner_id", id) }
-        }.decodeList<JsonObject>().firstOrNull()
-        val posts = client.postgrest["recipes"].select {
-            filter { eq("owner_id", id) }
-        }.decodeList<JsonObject>().map { post ->
+        val response = api.request("profile")
+        val row = response.getJSONObject("user")
+        val posts = response.getJSONArray("recipes").let { array -> (0 until array.length()).map { array.getJSONObject(it) } }
+            .map { post ->
             RecipePost(
-                id = post.string("id").orEmpty(),
-                title = post.string("title").orEmpty(),
-                body = post.string("body").orEmpty(),
-                archived = post.boolean("archived"),
-                showPublicly = post.boolean("show_publicly"),
-                createdAt = post.string("created_at").orEmpty(),
+                id = post.getLong("id").toString(),
+                title = post.optString("title"),
+                body = post.optString("body"),
+                archived = post.optBoolean("archived"),
+                showPublicly = post.optBoolean("show_publicly", true),
+                createdAt = post.optString("created_at"),
             )
         }.sortedByDescending { it.createdAt }
 
         return ProfileSnapshot(
             info = ProfileInfo(
-                id = id,
-                login = row.string("login").orEmpty(),
-                email = row.string("gmail"),
-                about = row.string("about").orEmpty(),
-                phone = row.string("phone"),
-                birthday = row.string("birthday"),
+                id = row.getLong("id").toString(),
+                login = row.optString("login"),
+                email = row.optString("gmail"),
+                about = row.optString("about"),
+                phone = row.optString("phone").takeUnless { it == "null" || it.isBlank() },
+                birthday = row.optString("birthday").takeUnless { it == "null" || it.isBlank() },
             ),
-            archivePublic = visibility?.boolean("is_public") ?: false,
+            archivePublic = response.optBoolean("archive_public"),
             posts = posts,
         )
     }
 
     override suspend fun saveInfo(info: ProfileInfo) {
-        client.postgrest["users"].update({
-            set("login", info.login)
-            set("about", info.about)
-            set("phone", info.phone)
-            set("birthday", info.birthday)
-        }) {
-            filter { eq("id", info.id) }
-        }
+        api.request("profile_save", JSONObject().put("login", info.login).put("about", info.about)
+            .put("phone", info.phone).put("birthday", info.birthday))
+        api.refreshIdentity()
     }
 
     override suspend fun setArchivePublic(ownerId: String, enabled: Boolean) {
-        client.postgrest["archive_settings"].upsert(
-            buildJsonObject {
-                put("owner_id", ownerId)
-                put("is_public", enabled)
-            },
-        ) { onConflict = "owner_id" }
+        api.request("archive_visibility", JSONObject().put("enabled", enabled))
     }
 
     override suspend fun addPost(ownerId: String, title: String, body: String) {
-        client.postgrest["recipes"].insert(buildJsonObject {
-            put("owner_id", ownerId)
-            put("title", title)
-            put("body", body)
-        })
+        api.request("recipe_add", JSONObject().put("title", title).put("body", body))
     }
 
     override suspend fun setArchived(ownerId: String, postId: String, archived: Boolean) {
-        client.postgrest["recipes"].update({ set("archived", archived) }) {
-            filter {
-                eq("id", postId)
-                eq("owner_id", ownerId)
-            }
-        }
+        api.request("recipe_archive", JSONObject().put("id", postId.toLong()).put("enabled", archived))
     }
 
     override suspend fun deletePost(ownerId: String, postId: String) {
-        client.postgrest["recipes"].delete {
-            filter {
-                eq("id", postId)
-                eq("owner_id", ownerId)
-                eq("archived", true)
-            }
-        }
+        api.request("recipe_delete", JSONObject().put("id", postId.toLong()))
     }
 
     override suspend fun setShowPublicly(ownerId: String, postId: String, enabled: Boolean) {
-        client.postgrest["recipes"].update({ set("show_publicly", enabled) }) {
-            filter {
-                eq("id", postId)
-                eq("owner_id", ownerId)
-                eq("archived", true)
-            }
-        }
+        api.request("recipe_public", JSONObject().put("id", postId.toLong()).put("enabled", enabled))
     }
 }
 
@@ -1124,7 +1194,7 @@ class LocalProfileRepository(
 
     override suspend fun addPost(ownerId: String, title: String, body: String) {
         val posts = readPosts() + RecipePost(
-            id = UUID.randomUUID().toString(),
+            id = newLocalId(),
             title = title,
             body = body,
             archived = false,
@@ -1181,10 +1251,6 @@ class LocalProfileRepository(
     }
 }
 
-private fun JsonObject.string(key: String): String? = this[key]?.jsonPrimitive?.contentOrNull
-
-private fun JsonObject.boolean(key: String): Boolean = this[key]?.jsonPrimitive?.booleanOrNull ?: false
-
 object AvatarStorage {
     fun fileFor(context: Context, profileKey: String): File {
         val digest = MessageDigest.getInstance("SHA-256")
@@ -1212,5 +1278,41 @@ object AvatarStorage {
                 error("Не удалось сохранить изображение")
             }
         }
+    }
+}
+
+class RemoteAvatarStorage(private val api: DemoApi) {
+    private val mutex = Mutex()
+
+    suspend fun sync(context: Context, userId: String): Boolean = mutex.withLock {
+        val encoded = api.request("avatar_download").optString("image")
+        val local = AvatarStorage.fileFor(context, userId)
+        if (encoded.isBlank() || encoded == "null") {
+            if (local.exists()) {
+                upload(userId, local)
+            }
+            return@withLock false
+        }
+        val bytes = Base64.decode(encoded, Base64.DEFAULT)
+        withContext(Dispatchers.IO) {
+            local.parentFile?.mkdirs()
+            val temp = File(local.parentFile, "${local.name}.tmp")
+            temp.writeBytes(bytes)
+            if (!temp.renameTo(local)) {
+                temp.copyTo(local, overwrite = true)
+                temp.delete()
+            }
+        }
+        true
+    }
+
+    suspend fun save(context: Context, userId: String, uri: Uri) = mutex.withLock {
+        AvatarStorage.save(context, userId, uri)
+        upload(userId, AvatarStorage.fileFor(context, userId))
+    }
+
+    private suspend fun upload(userId: String, local: File) {
+        val bytes = withContext(Dispatchers.IO) { local.readBytes() }
+        api.uploadImage("avatar_upload", bytes)
     }
 }

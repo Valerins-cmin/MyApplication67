@@ -1,8 +1,6 @@
 package com.example.myapplication67
 
 import android.util.Patterns
-import io.github.jan.supabase.auth.exception.AuthErrorCode
-import io.github.jan.supabase.auth.exception.AuthRestException
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,6 +15,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -31,6 +31,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Visibility
+import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -42,12 +46,14 @@ fun RegScreen(
     repository: AuthRepository,
     onLogClick: () -> Unit,
     onGuestClick: () -> Unit,
-    onRegistered: (String, String) -> Unit,
+    onRegistered: () -> Unit,
 ) {
     var login by rememberSaveable { mutableStateOf("") }
     var email by rememberSaveable { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var repeatPassword by remember { mutableStateOf("") }
+    var passwordVisible by rememberSaveable { mutableStateOf(false) }
+    var repeatPasswordVisible by rememberSaveable { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
@@ -87,7 +93,13 @@ fun RegScreen(
             label = { Text("Пароль") },
             supportingText = { Text("От 6 до 128 символов и хотя бы одна латинская буква") },
             singleLine = true,
-            visualTransformation = PasswordVisualTransformation(),
+            visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+            trailingIcon = {
+                IconButton(onClick = { passwordVisible = !passwordVisible }) {
+                    Icon(if (passwordVisible) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
+                        contentDescription = if (passwordVisible) "Скрыть пароль" else "Показать пароль")
+                }
+            },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
             modifier = Modifier.fillMaxWidth(),
         )
@@ -97,7 +109,13 @@ fun RegScreen(
             onValueChange = { repeatPassword = it; errorMessage = null },
             label = { Text("Повторите пароль") },
             singleLine = true,
-            visualTransformation = PasswordVisualTransformation(),
+            visualTransformation = if (repeatPasswordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+            trailingIcon = {
+                IconButton(onClick = { repeatPasswordVisible = !repeatPasswordVisible }) {
+                    Icon(if (repeatPasswordVisible) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
+                        contentDescription = if (repeatPasswordVisible) "Скрыть повтор пароля" else "Показать повтор пароля")
+                }
+            },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
             modifier = Modifier.fillMaxWidth(),
         )
@@ -125,16 +143,7 @@ fun RegScreen(
                     scope.launch {
                         try {
                             repository.register(normalizedLogin, normalizedEmail, password)
-                            onRegistered(normalizedLogin, normalizedEmail)
-                        } catch (error: AuthRestException) {
-                            errorMessage = when (error.errorCode) {
-                                AuthErrorCode.WeakPassword ->
-                                    "Пароль не подошёл: ${error.message ?: "проверьте требования"}"
-                                AuthErrorCode.EmailExists, AuthErrorCode.UserAlreadyExists -> "Эта почта уже зарегистрирована."
-                                AuthErrorCode.OverEmailSendRateLimit, AuthErrorCode.OverRequestRateLimit ->
-                                    "Слишком много попыток. Попробуйте позже."
-                                else -> "Ошибка регистрации: ${error.message ?: "проверьте данные"}"
-                            }
+                            onRegistered()
                         } catch (error: Exception) {
                             errorMessage = "Ошибка регистрации: ${error.message ?: "проверьте подключение"}"
                         } finally {

@@ -36,10 +36,15 @@ import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.Image
+import androidx.compose.material.icons.outlined.MoreVert
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.People
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -76,6 +81,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
@@ -91,6 +97,24 @@ enum class FeedCategory(val title: String) {
 }
 
 private val reactionChoices = listOf("❤️", "🔥", "😍", "👍", "👏", "😋")
+
+private sealed interface FeedEntry {
+    val key: String
+    val createdAt: String
+    val authorLogin: String
+
+    data class PostItem(val post: FeedPost) : FeedEntry {
+        override val key = "post:${post.id}"
+        override val createdAt = post.createdAt
+        override val authorLogin = post.authorLogin
+    }
+
+    data class ProfileRecipeItem(val recipe: PublishedRecipe) : FeedEntry {
+        override val key = "recipe:${recipe.id}"
+        override val createdAt = recipe.createdAt
+        override val authorLogin = recipe.authorLogin
+    }
+}
 
 @Composable
 fun FeedScreen(
@@ -112,6 +136,7 @@ fun FeedScreen(
     var page by rememberSaveable { mutableStateOf("feed") }
     var activePostId by rememberSaveable { mutableStateOf<String?>(null) }
     var posts by remember(dataSource) { mutableStateOf<List<FeedPost>>(emptyList()) }
+    var profileRecipes by remember(dataSource) { mutableStateOf<List<PublishedRecipe>>(emptyList()) }
     var loading by remember(dataSource) { mutableStateOf(true) }
     var loadError by remember(dataSource) { mutableStateOf(false) }
     var refreshKey by remember { mutableIntStateOf(0) }
@@ -129,6 +154,9 @@ fun FeedScreen(
     var recipe by rememberSaveable { mutableStateOf("") }
     var saveError by remember { mutableStateOf<String?>(null) }
     var saving by remember { mutableStateOf(false) }
+    var editingPost by remember { mutableStateOf<FeedPost?>(null) }
+    var deleteCandidate by remember { mutableStateOf<FeedPost?>(null) }
+    var deleting by remember { mutableStateOf(false) }
 
     var comments by remember { mutableStateOf<List<FeedComment>>(emptyList()) }
     var commentsLoading by remember { mutableStateOf(false) }
@@ -136,7 +164,8 @@ fun FeedScreen(
     var commentError by remember { mutableStateOf<String?>(null) }
     var sendingComment by remember { mutableStateOf(false) }
     var commentsRefresh by remember { mutableIntStateOf(0) }
-    val availableAuthors = posts.map { it.authorLogin }.filter { it.isNotBlank() && it != currentLogin }
+    val availableAuthors = (posts.map { it.authorLogin } + profileRecipes.map { it.authorLogin })
+        .filter { it.isNotBlank() && it != currentLogin }
         .distinct().sorted()
     val toggleFollow: (String) -> Unit = { login ->
         followedLogins = if (login in followedLogins) followedLogins - login else followedLogins + login
@@ -151,11 +180,14 @@ fun FeedScreen(
     }
 
     LaunchedEffect(dataSource, refreshKey) {
-        loading = posts.isEmpty()
+        loading = posts.isEmpty() && profileRecipes.isEmpty()
         while (true) {
-            runCatching { dataSource.loadPosts() }
+            val cardResult = runCatching { dataSource.loadPosts() }
+            val recipeResult = runCatching { dataSource.loadPublishedProfileRecipes() }
+            cardResult
                 .onSuccess { posts = it; loadError = false }
-                .onFailure { loadError = posts.isEmpty() }
+            recipeResult.onSuccess { profileRecipes = it }
+            loadError = cardResult.isFailure && recipeResult.isFailure && posts.isEmpty() && profileRecipes.isEmpty()
             loading = false
             delay(60_000)
         }
@@ -184,6 +216,8 @@ fun FeedScreen(
         when (page) {
             "editor" -> FeedEditor(
                 dataSource = dataSource,
+                editing = editingPost != null,
+                existingImagePath = editingPost?.imagePath,
                 pickedImage = pickedImage,
                 imageUrl = imageUrl,
                 onImageUrlChange = { value ->
@@ -216,7 +250,7 @@ fun FeedScreen(
                     val categoryId = selectedRecipeCategoryId
                     when {
                         currentLogin.isBlank() -> saveError = "Подождите загрузки профиля"
-                        image == null -> saveError = "Выберите фото или вставьте ссылку на изображение"
+                        image == null && editingPost == null -> saveError = "Выберите фото или вставьте ссылку на изображение"
                         image is FeedImageInput.Link && !FeedImageStorage.isValidExternalUrl(image.url) ->
                             saveError = "Введите корректную HTTPS-ссылку на изображение"
                         categoryId == null -> saveError = "Выберите категорию"
@@ -227,20 +261,26 @@ fun FeedScreen(
                             saveError = null
                             scope.launch {
                                 try {
-                                    dataSource.publish(context, currentUserId, currentLogin, image, title.trim(), description.trim(), recipe.trim(), categoryId)
+                                    val edited = editingPost
+                                    if (edited == null) {
+                                        dataSource.publish(context, currentUserId, currentLogin, image!!, title.trim(), description.trim(), recipe.trim(), categoryId)
+                                    } else {
+                                        dataSource.updatePost(context, edited, currentLogin, image, title.trim(), description.trim(), recipe.trim(), categoryId)
+                                    }
                                     pickedImage = null
                                     imageUrl = ""
                                     selectedRecipeCategoryId = null
                                     title = ""
                                     description = ""
                                     recipe = ""
+                                    editingPost = null
                                     page = "feed"
                                     refreshKey++
                                 } catch (error: Exception) {
                                     saveError = when (error.message) {
                                         "Изображение слишком большое", "Неверный формат изображения",
                                         "Не удалось открыть изображение по ссылке", "Введите корректную HTTPS-ссылку на изображение" -> error.message
-                                        else -> "Не удалось опубликовать рецепт. Попробуйте ещё раз."
+                                        else -> "Не удалось сохранить рецепт. Попробуйте ещё раз."
                                     }
                                 } finally {
                                     saving = false
@@ -302,10 +342,16 @@ fun FeedScreen(
                         }
                     }
                     HorizontalDivider()
-                    val visiblePosts = when (selectedCategory) {
-                        FeedCategory.SUBSCRIPTIONS -> posts.filter { it.authorLogin in followedLogins }
-                        FeedCategory.POPULAR -> posts.sortedByDescending { it.reactions.size }
-                        FeedCategory.MAIN, FeedCategory.NEW -> posts
+                    val allEntries = posts.map { FeedEntry.PostItem(it) } +
+                        profileRecipes.map { FeedEntry.ProfileRecipeItem(it) }
+                    val visibleEntries = when (selectedCategory) {
+                        FeedCategory.SUBSCRIPTIONS -> allEntries.filter { it.authorLogin in followedLogins }
+                            .sortedByDescending { it.createdAt }
+                        FeedCategory.POPULAR -> allEntries.sortedWith(
+                            compareByDescending<FeedEntry> { (it as? FeedEntry.PostItem)?.post?.reactions?.size ?: 0 }
+                                .thenByDescending { it.createdAt },
+                        )
+                        FeedCategory.MAIN, FeedCategory.NEW -> allEntries.sortedByDescending { it.createdAt }
                     }
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
@@ -350,7 +396,7 @@ fun FeedScreen(
                                 )
                             }
                         }
-                        if (loading && posts.isEmpty()) {
+                        if (loading && posts.isEmpty() && profileRecipes.isEmpty()) {
                             item { Box(Modifier.fillMaxWidth().height(160.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
                         } else if (loadError) {
                             item {
@@ -358,7 +404,7 @@ fun FeedScreen(
                                     Text("Не удалось загрузить ленту. Повторить")
                                 }
                             }
-                        } else if (visiblePosts.isEmpty()) {
+                        } else if (visibleEntries.isEmpty()) {
                             item {
                                 FeedEmptyCard(
                                     Icons.AutoMirrored.Outlined.Feed,
@@ -367,8 +413,12 @@ fun FeedScreen(
                                 )
                             }
                         } else {
-                            items(visiblePosts, key = { it.id }) { post ->
-                                FeedPostCard(
+                            items(visibleEntries, key = { it.key }) { entry ->
+                                when (entry) {
+                                    is FeedEntry.ProfileRecipeItem -> PublishedRecipeCard(entry.recipe)
+                                    is FeedEntry.PostItem -> {
+                                        val post = entry.post
+                                        FeedPostCard(
                                     post = post,
                                     categoryName = recipeCategories.firstOrNull { it.id == post.categoryId }?.name,
                                     dataSource = dataSource,
@@ -403,16 +453,89 @@ fun FeedScreen(
                                         }
                                         context.startActivity(Intent.createChooser(intent, "Поделиться рецептом"))
                                     },
-                                )
+                                    onEdit = {
+                                        editingPost = post
+                                        pickedImage = null
+                                        imageUrl = ""
+                                        selectedRecipeCategoryId = post.categoryId
+                                        title = post.title
+                                        description = post.description
+                                        recipe = post.recipe
+                                        saveError = null
+                                        page = "editor"
+                                    },
+                                    onDelete = { deleteCandidate = post },
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
                 }
                 FloatingActionButton(
-                    onClick = { saveError = null; page = "editor" },
+                    onClick = {
+                        editingPost = null
+                        pickedImage = null
+                        imageUrl = ""
+                        selectedRecipeCategoryId = null
+                        title = ""
+                        description = ""
+                        recipe = ""
+                        saveError = null
+                        page = "editor"
+                    },
                     modifier = Modifier.align(Alignment.BottomStart).padding(16.dp),
                 ) {
                     Icon(Icons.Outlined.Add, contentDescription = "Создать рецепт")
+                }
+            }
+        }
+        deleteCandidate?.let { post ->
+            AlertDialog(
+                onDismissRequest = { if (!deleting) deleteCandidate = null },
+                title = { Text("Удалить публикацию?") },
+                text = { Text("Карточка и её комментарии исчезнут из ленты.") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        deleting = true
+                        scope.launch {
+                            try {
+                                dataSource.deletePost(post)
+                                posts = posts.filterNot { it.id == post.id }
+                                refreshKey++
+                                deleteCandidate = null
+                            } catch (_: Exception) {
+                                Toast.makeText(context, "Не удалось удалить публикацию", Toast.LENGTH_SHORT).show()
+                            } finally { deleting = false }
+                        }
+                    }, enabled = !deleting) {
+                        Text("Удалить", color = MaterialTheme.colorScheme.error)
+                    }
+                },
+                dismissButton = { TextButton(onClick = { deleteCandidate = null }, enabled = !deleting) { Text("Отмена") } },
+            )
+        }
+    }
+}
+
+@Composable
+private fun PublishedRecipeCard(recipe: PublishedRecipe) {
+    var expanded by rememberSaveable(recipe.id) { mutableStateOf(false) }
+    Card(shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.fillMaxWidth().padding(16.dp)) {
+            Text("@${recipe.authorLogin}", style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary)
+            Text("Рецепт из профиля", style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(8.dp))
+            Text(recipe.title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            if (recipe.body.isNotBlank()) {
+                Spacer(Modifier.height(8.dp))
+                Text(recipe.body, style = MaterialTheme.typography.bodyMedium,
+                    maxLines = if (expanded) Int.MAX_VALUE else 3,
+                    overflow = TextOverflow.Ellipsis)
+                TextButton(onClick = { expanded = !expanded }) {
+                    Text(if (expanded) "Свернуть рецепт" else "Показать рецепт")
                 }
             }
         }
@@ -429,9 +552,12 @@ private fun FeedPostCard(
     onReaction: (String) -> Unit,
     onComments: () -> Unit,
     onShare: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
 ) {
     var expanded by rememberSaveable(post.id) { mutableStateOf(false) }
     var reactionMenu by remember { mutableStateOf(false) }
+    var actionMenu by remember { mutableStateOf(false) }
     val reactionCounts = post.reactions.groupingBy { it.emoji }.eachCount()
     val myReaction = post.reactions.firstOrNull { it.userId == currentUserId }?.emoji
     Card(shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth()) {
@@ -487,6 +613,25 @@ private fun FeedPostCard(
                         Text(post.commentCount.toString(), style = MaterialTheme.typography.labelMedium)
                     }
                     IconButton(onClick = onShare) { Icon(Icons.Outlined.Share, contentDescription = "Репост") }
+                    if (post.authorId == currentUserId) {
+                        Box {
+                            IconButton(onClick = { actionMenu = true }) {
+                                Icon(Icons.Outlined.MoreVert, contentDescription = "Действия с публикацией")
+                            }
+                            DropdownMenu(expanded = actionMenu, onDismissRequest = { actionMenu = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("Редактировать") },
+                                    leadingIcon = { Icon(Icons.Outlined.Edit, contentDescription = null) },
+                                    onClick = { actionMenu = false; onEdit() },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Удалить", color = MaterialTheme.colorScheme.error) },
+                                    leadingIcon = { Icon(Icons.Outlined.DeleteOutline, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+                                    onClick = { actionMenu = false; onDelete() },
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -535,6 +680,8 @@ private fun FeedImageFrame(bitmap: ImageBitmap?, height: Dp = 300.dp) {
 @Composable
 private fun FeedEditor(
     dataSource: FeedDataSource,
+    editing: Boolean,
+    existingImagePath: String?,
     pickedImage: String?,
     imageUrl: String,
     onImageUrlChange: (String) -> Unit,
@@ -574,27 +721,46 @@ private fun FeedEditor(
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "Назад") }
-            Text("Новый рецепт", style = MaterialTheme.typography.titleLarge)
+            Text(if (editing) "Редактировать рецепт" else "Новый рецепт", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
         }
-        Spacer(Modifier.height(12.dp))
-        if (pickedImage != null) FeedImageFrame(preview)
-        else previewUrl?.let { FeedPostImage(dataSource, it) }
-        Spacer(Modifier.height(12.dp))
-        OutlinedButton(onClick = onPickImage, modifier = Modifier.fillMaxWidth()) {
-            Text(if (pickedImage == null) "Выбрать фото" else "Сменить фото")
-        }
-        Spacer(Modifier.height(8.dp))
-        Text("или", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.height(8.dp))
-        OutlinedTextField(
-            value = imageUrl,
-            onValueChange = onImageUrlChange,
-            label = { Text("URL картинки") },
-            supportingText = { Text("Публичная HTTPS-ссылка на JPG, PNG или WebP") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
+        Text(
+            if (editing) "Обновите фото, категорию или текст публикации" else "Добавьте фото и расскажите, как приготовить блюдо",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 48.dp, bottom = 18.dp),
         )
-        Spacer(Modifier.height(14.dp))
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
+            Column(Modifier.fillMaxWidth().padding(16.dp)) {
+                Text("Фото блюда", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(12.dp))
+                Card(shape = RoundedCornerShape(16.dp)) {
+                    if (pickedImage != null) FeedImageFrame(preview, 220.dp)
+                    else if (previewUrl != null) FeedPostImage(dataSource, previewUrl!!, 220.dp)
+                    else if (existingImagePath != null) FeedPostImage(dataSource, existingImagePath, 220.dp)
+                    else FeedImageFrame(null, 220.dp)
+                }
+                Spacer(Modifier.height(12.dp))
+                OutlinedButton(onClick = onPickImage, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Outlined.Image, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (editing || pickedImage != null) "Сменить фото" else "Выбрать фото")
+                }
+                OutlinedTextField(
+                    value = imageUrl,
+                    onValueChange = onImageUrlChange,
+                    label = { Text("Или URL картинки") },
+                    supportingText = { Text(if (editing) "Пустое поле сохранит текущее фото" else "Публичная HTTPS-ссылка на JPG, PNG или WebP") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
+            Column(Modifier.fillMaxWidth().padding(16.dp)) {
+        Text("О рецепте", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(12.dp))
         Box {
             OutlinedButton(
                 onClick = { categoryMenuExpanded = true },
@@ -618,15 +784,17 @@ private fun FeedEditor(
             TextButton(onClick = onRetryCategories) { Text("Не удалось загрузить категории. Повторить") }
         }
         Spacer(Modifier.height(10.dp))
-        OutlinedTextField(title, onTitleChange, label = { Text("Название") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(title, onTitleChange, label = { Text("Название") }, singleLine = true, shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth())
         Spacer(Modifier.height(10.dp))
-        OutlinedTextField(description, onDescriptionChange, label = { Text("Краткое описание") }, minLines = 2, maxLines = 4, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(description, onDescriptionChange, label = { Text("Краткое описание") }, minLines = 2, maxLines = 4, shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth())
         Spacer(Modifier.height(10.dp))
-        OutlinedTextField(recipe, onRecipeChange, label = { Text("Рецепт") }, minLines = 5, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(recipe, onRecipeChange, label = { Text("Ингредиенты и приготовление") }, minLines = 5, shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth())
+            }
+        }
         error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 12.dp)) }
         Spacer(Modifier.height(18.dp))
         Button(onClick = onSave, enabled = !saving, modifier = Modifier.fillMaxWidth()) {
-            Text(if (saving) "Публикация…" else "Опубликовать")
+            Text(if (saving) "Сохранение…" else if (editing) "Сохранить изменения" else "Опубликовать")
         }
         Spacer(Modifier.height(24.dp))
     }
